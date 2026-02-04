@@ -20,12 +20,19 @@ class MPMSolver:
     Follows DiffTaichi architecture for future gradient support.
     """
 
-    def __init__(self, config: Optional[SimulationConfig] = None):
+    def __init__(self, config: Optional[SimulationConfig] = None, seed: int = 42):
+        """Initialize the MPM solver.
+
+        Args:
+            config: Simulation configuration (uses default if None)
+            seed: Random seed for reproducible particle placement
+        """
         self.config = config or default_config()
+        self.seed = seed
         self._init_fields()
         self._init_particles()
 
-    def _init_fields(self):
+    def _init_fields(self) -> None:
         """Initialize Taichi fields for particles and grid."""
         cfg = self.config
         n_particles = cfg.n_particles
@@ -49,21 +56,28 @@ class MPMSolver:
         self.inv_dx = cfg.grid.inv_dx
         self.dt = cfg.physics.dt
         self.p_mass = 1.0  # particle mass (uniform)
-        self.p_vol = (self.dx * 0.5) ** 2  # particle volume
 
-        # Lame parameters for Neo-Hookean
-        self.mu = cfg.physics.mu
-        self.lambda_ = cfg.physics.lambda_
-        self.E = cfg.physics.E
+        # Particle volume: total cell volume / particles per cell
+        # This ensures mass conservation
+        self.p_vol = (self.dx ** 2) / cfg.particles.particles_per_cell
+
+        # Bulk modulus for weakly compressible fluid (2D plane strain)
+        # K = E / (2 * (1 - nu)) for 2D
+        E = cfg.physics.E
+        nu = cfg.physics.nu
+        self.bulk_modulus = E / (2.0 * (1.0 - nu))
 
         # Gravity
         self.gravity = ti.Vector(cfg.physics.gravity)
 
-    def _init_particles(self):
+    def _init_particles(self) -> None:
         """Initialize particle positions in water region."""
         cfg = self.config
         x_min, y_min, x_max, y_max = cfg.particles.water_region
         n_particles = cfg.n_particles
+
+        # Set random seed for reproducibility
+        rng = np.random.default_rng(self.seed)
 
         # Generate particle positions on CPU, then copy to GPU
         positions = np.zeros((n_particles, 2), dtype=np.float32)
@@ -81,8 +95,8 @@ class MPMSolver:
                 # Jitter particles within cell
                 for _ in range(ppc):
                     if idx < n_particles:
-                        jitter_x = (np.random.random() - 0.5) * self.dx * 0.8
-                        jitter_y = (np.random.random() - 0.5) * self.dx * 0.8
+                        jitter_x = (rng.random() - 0.5) * self.dx * 0.8
+                        jitter_y = (rng.random() - 0.5) * self.dx * 0.8
                         positions[idx] = [cell_x + jitter_x, cell_y + jitter_y]
                         idx += 1
 
@@ -113,29 +127,34 @@ class MPMSolver:
         """Particle-to-Grid transfer using quadratic B-spline weights.
 
         Transfers particle momentum to grid nodes.
-        Computes stress from Neo-Hookean fluid model.
+        Computes stress from weakly compressible fluid model.
         """
         for p in range(self.n_particles):
             # Get particle position in grid coordinates
             Xp = self.x[p] * self.inv_dx
-            base = int(Xp - 0.5)  # Base grid node
-            fx = Xp - base  # Fractional position within cell
+            base = ti.cast(Xp - 0.5, ti.i32)  # Base grid node
+            fx = Xp - ti.cast(base, ti.f32)  # Fractional position within cell
 
             # Quadratic B-spline weights (3x3 stencil)
-            w = [
-                0.5 * (1.5 - fx) ** 2,
-                0.75 - (fx - 1.0) ** 2,
-                0.5 * (fx - 0.5) ** 2,
-            ]
+            # Computed separately for x and y dimensions for clarity
+            wx = ti.Vector([
+                0.5 * (1.5 - fx.x) ** 2,
+                0.75 - (fx.x - 1.0) ** 2,
+                0.5 * (fx.x - 0.5) ** 2,
+            ])
+            wy = ti.Vector([
+                0.5 * (1.5 - fx.y) ** 2,
+                0.75 - (fx.y - 1.0) ** 2,
+                0.5 * (fx.y - 0.5) ** 2,
+            ])
 
-            # Neo-Hookean fluid stress computation
-            # For fluid: shear modulus = 0, only bulk response
+            # Weakly compressible fluid stress computation
             J = self.J[p]
 
-            # Fluid pressure: p = -bulk_modulus * (J - 1)
-            # Simplified stress for weakly compressible fluid
-            # Using equation of state style pressure
-            pressure = -self.E * (J - 1.0)
+            # Pressure from equation of state: p = K * (J - 1) / J
+            # Division by J converts to Cauchy stress
+            # Negative sign: positive pressure = compression
+            pressure = -self.bulk_modulus * (J - 1.0) / J
 
             # Cauchy stress (isotropic for fluid)
             stress = ti.Matrix([
@@ -143,18 +162,18 @@ class MPMSolver:
                 [0.0, pressure]
             ])
 
-            # APIC momentum transfer
+            # APIC momentum transfer: stress contribution + affine velocity
             affine = stress * self.p_vol * self.inv_dx + self.p_mass * self.C[p]
 
             # Scatter to 3x3 grid neighborhood
             for i, j in ti.static(ti.ndrange(3, 3)):
                 offset = ti.Vector([i, j])
-                dpos = (offset - fx) * self.dx
-                weight = w[i].x * w[j].y
+                dpos = (ti.cast(offset, ti.f32) - fx) * self.dx
+                weight = wx[i] * wy[j]
 
                 grid_idx = base + offset
                 if 0 <= grid_idx.x < self.n_grid and 0 <= grid_idx.y < self.n_grid:
-                    # Accumulate momentum and mass
+                    # Accumulate momentum and mass (atomic on GPU)
                     self.grid_v[grid_idx] += weight * (self.p_mass * self.v[p] + affine @ dpos)
                     self.grid_m[grid_idx] += weight * self.p_mass
 
@@ -169,15 +188,15 @@ class MPMSolver:
                 # Apply gravity
                 self.grid_v[i, j] += self.dt * self.gravity
 
-                # Boundary conditions (sticky at walls)
+                # Boundary conditions (sticky/separating at walls)
                 bound = 3  # boundary thickness in cells
                 if i < bound and self.grid_v[i, j].x < 0:
                     self.grid_v[i, j].x = 0
-                if i > self.n_grid - bound and self.grid_v[i, j].x > 0:
+                if i >= self.n_grid - bound and self.grid_v[i, j].x > 0:
                     self.grid_v[i, j].x = 0
                 if j < bound and self.grid_v[i, j].y < 0:
                     self.grid_v[i, j].y = 0
-                if j > self.n_grid - bound and self.grid_v[i, j].y > 0:
+                if j >= self.n_grid - bound and self.grid_v[i, j].y > 0:
                     self.grid_v[i, j].y = 0
 
     @ti.kernel
@@ -185,19 +204,25 @@ class MPMSolver:
         """Grid-to-Particle transfer.
 
         Interpolates grid velocities to particles and updates positions.
+        Updates deformation gradient F and volume ratio J.
         """
         for p in range(self.n_particles):
             # Get particle position in grid coordinates
             Xp = self.x[p] * self.inv_dx
-            base = int(Xp - 0.5)
-            fx = Xp - base
+            base = ti.cast(Xp - 0.5, ti.i32)
+            fx = Xp - ti.cast(base, ti.f32)
 
-            # Quadratic B-spline weights
-            w = [
-                0.5 * (1.5 - fx) ** 2,
-                0.75 - (fx - 1.0) ** 2,
-                0.5 * (fx - 0.5) ** 2,
-            ]
+            # Quadratic B-spline weights (separate x and y)
+            wx = ti.Vector([
+                0.5 * (1.5 - fx.x) ** 2,
+                0.75 - (fx.x - 1.0) ** 2,
+                0.5 * (fx.x - 0.5) ** 2,
+            ])
+            wy = ti.Vector([
+                0.5 * (1.5 - fx.y) ** 2,
+                0.75 - (fx.y - 1.0) ** 2,
+                0.5 * (fx.y - 0.5) ** 2,
+            ])
 
             new_v = ti.Vector([0.0, 0.0])
             new_C = ti.Matrix.zero(ti.f32, 2, 2)
@@ -205,15 +230,16 @@ class MPMSolver:
             # Gather from 3x3 grid neighborhood
             for i, j in ti.static(ti.ndrange(3, 3)):
                 offset = ti.Vector([i, j])
-                dpos = (offset - fx) * self.dx
-                weight = w[i].x * w[j].y
+                dpos = ti.cast(offset, ti.f32) - fx  # Unscaled for APIC
+                weight = wx[i] * wy[j]
 
                 grid_idx = base + offset
                 if 0 <= grid_idx.x < self.n_grid and 0 <= grid_idx.y < self.n_grid:
                     g_v = self.grid_v[grid_idx]
                     new_v += weight * g_v
                     # APIC: reconstruct affine velocity field
-                    new_C += 4.0 * self.inv_dx * weight * g_v.outer_product(dpos)
+                    # C = B @ D^-1, where D^-1 = 4 * inv_dx^2 for quadratic B-spline
+                    new_C += 4.0 * self.inv_dx * self.inv_dx * weight * g_v.outer_product(dpos)
 
             self.v[p] = new_v
             self.C[p] = new_C
@@ -221,22 +247,31 @@ class MPMSolver:
             # Update position
             self.x[p] += self.dt * new_v
 
-            # Update deformation gradient (for fluid: track volume change only)
+            # Update deformation gradient F
             # F_new = (I + dt * grad_v) @ F_old
-            # For fluid, we only track J (determinant)
-            self.J[p] *= 1.0 + self.dt * new_C.trace()
+            # For APIC with quadratic B-spline: grad_v = C (since we scaled C by D^-1)
+            F_new = (ti.Matrix.identity(ti.f32, 2) + self.dt * new_C) @ self.F[p]
+            self.F[p] = F_new
 
-            # Clamp J to prevent instability
-            self.J[p] = ti.max(self.J[p], 0.1)
+            # Update J (determinant of F) - volume ratio
+            self.J[p] = F_new.determinant()
 
-    def substep(self):
+            # Clamp J to prevent instability (both lower and upper bounds)
+            self.J[p] = ti.max(ti.min(self.J[p], 4.0), 0.1)
+
+            # For fluid: reset F to isotropic while preserving J
+            # This removes shear deformation history (fluids don't resist shear)
+            sqrt_J = ti.sqrt(self.J[p])
+            self.F[p] = ti.Matrix([[sqrt_J, 0.0], [0.0, sqrt_J]])
+
+    def substep(self) -> None:
         """Execute one simulation substep: P2G -> Grid ops -> G2P."""
         self._clear_grid()
         self._p2g()
         self._grid_op()
         self._g2p()
 
-    def step(self):
+    def step(self) -> None:
         """Execute one frame's worth of substeps."""
         for _ in range(self.config.steps_per_frame):
             self.substep()
@@ -245,19 +280,23 @@ class MPMSolver:
         """Return particle positions as numpy array (N, 2)."""
         return self.x.to_numpy()
 
-    def reset(self):
+    def get_particle_volumes(self) -> np.ndarray:
+        """Return particle volume ratios (J) as numpy array."""
+        return self.J.to_numpy()
+
+    def reset(self) -> None:
         """Reset simulation to initial state."""
         self._init_particles()
 
 
-def init_taichi(arch: str = "auto"):
+def init_taichi(arch: str = "auto") -> None:
     """Initialize Taichi with specified architecture.
 
     Args:
         arch: "auto", "cpu", "cuda", or "vulkan"
     """
     arch_map = {
-        "auto": None,  # Let Taichi choose
+        "auto": None,
         "cpu": ti.cpu,
         "cuda": ti.cuda,
         "vulkan": ti.vulkan,
