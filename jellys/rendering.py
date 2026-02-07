@@ -1,7 +1,7 @@
 """Headless rendering for MPM simulation output.
 
 Generates PNG frames and animated GIFs using PIL.
-Supports multi-material visualization (fluid, jellyfish, actuators).
+Color-codes particles by material: fluid (blue), body (pink), actuator (bright pink).
 """
 
 import numpy as np
@@ -13,13 +13,11 @@ from .config import RenderConfig
 
 
 class Renderer:
-    """Headless renderer for particle visualization with multi-material support."""
+    """Headless particle renderer with multi-material support."""
 
     def __init__(self, config: Optional[RenderConfig] = None):
         self.config = config or RenderConfig()
         self.frames: List[Image.Image] = []
-
-        # Ensure output directory exists
         self.output_path = Path(self.config.output_dir)
         self.output_path.mkdir(parents=True, exist_ok=True)
 
@@ -31,100 +29,59 @@ class Renderer:
         actuators: Optional[np.ndarray] = None,
         water_level: Optional[float] = None,
     ) -> Image.Image:
-        """Render a single frame from particle positions.
-
-        Args:
-            positions: (N, 2) array of particle positions in [0, 1] normalized coords
-            frame_num: Frame number for saving
-            materials: (N,) array of material types (0=fluid, 1=jelly)
-            actuators: (N,) array of actuator flags (1=actuator)
-            water_level: Y-coordinate of water surface for visualization
-
-        Returns:
-            PIL Image of the rendered frame
-        """
+        """Render one frame from particle positions in [0, 1] normalized coords."""
         cfg = self.config
-        width, height = cfg.width, cfg.height
+        w, h = cfg.width, cfg.height
 
-        # Create image with background
-        img = Image.new("RGB", (width, height), cfg.background_color)
+        img = Image.new("RGB", (w, h), cfg.background_color)
         draw = ImageDraw.Draw(img)
 
-        # Draw water level line if specified
+        # Water level indicator
         if water_level is not None and cfg.draw_water_level:
-            water_y = int((1.0 - water_level) * height)
-            draw.line([(0, water_y), (width, water_y)], fill=cfg.water_level_color, width=1)
+            wy = int((1.0 - water_level) * h)
+            draw.line([(0, wy), (w, wy)], fill=cfg.water_level_color, width=1)
 
-        # Convert normalized positions to pixel coordinates
-        # Flip Y axis (simulation Y=0 is bottom, image Y=0 is top)
-        pixel_x = (positions[:, 0] * width).astype(int)
-        pixel_y = ((1.0 - positions[:, 1]) * height).astype(int)
+        # Particle positions -> pixel coords (flip Y: sim bottom=0, image top=0)
+        px = (positions[:, 0] * w).astype(int)
+        py = ((1.0 - positions[:, 1]) * h).astype(int)
 
-        radius = cfg.particle_radius
-
-        # Determine colors per particle
-        n_particles = len(positions)
+        n = len(positions)
         if materials is None:
-            materials = np.zeros(n_particles, dtype=np.int32)
+            materials = np.zeros(n, dtype=np.int32)
         if actuators is None:
-            actuators = np.zeros(n_particles, dtype=np.int32)
+            actuators = np.zeros(n, dtype=np.int32)
 
-        # Draw particles
-        for i, (px, py) in enumerate(zip(pixel_x, pixel_y)):
-            if 0 <= px < width and 0 <= py < height:
-                # Choose color based on material and actuator status
-                if materials[i] == 0:  # Fluid
+        r = cfg.particle_radius
+        for i, (x, y) in enumerate(zip(px, py)):
+            if 0 <= x < w and 0 <= y < h:
+                if materials[i] == 0:
                     color = cfg.particle_color
-                elif actuators[i] == 1:  # Jellyfish actuator (rim)
+                elif actuators[i] == 1:
                     color = cfg.actuator_color
-                else:  # Jellyfish body
+                else:
                     color = cfg.jelly_color
+                draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
 
-                draw.ellipse(
-                    [px - radius, py - radius, px + radius, py + radius],
-                    fill=color
-                )
-
-        # Save frame if configured
         if cfg.save_frames:
-            frame_path = self.output_path / f"frame_{frame_num:04d}.png"
-            img.save(frame_path)
+            img.save(self.output_path / f"frame_{frame_num:04d}.png")
 
-        # Store for GIF generation
         self.frames.append(img.copy())
-
         return img
 
     def save_gif(self, filename: str = "simulation.gif"):
-        """Save accumulated frames as animated GIF.
-
-        Args:
-            filename: Output GIF filename
-        """
         if not self.frames:
-            print("No frames to save!")
+            print("No frames to save")
             return
-
         gif_path = self.output_path / filename
-        frame_duration = int(1000 / self.config.fps)  # ms per frame
-
-        # Save as GIF
+        ms_per_frame = int(1000 / self.config.fps)
         self.frames[0].save(
-            gif_path,
-            save_all=True,
-            append_images=self.frames[1:],
-            duration=frame_duration,
-            loop=0  # Loop forever
+            gif_path, save_all=True, append_images=self.frames[1:],
+            duration=ms_per_frame, loop=0,
         )
         print(f"Saved GIF: {gif_path} ({len(self.frames)} frames)")
 
     def clear_frames(self):
-        """Clear stored frames to free memory."""
         self.frames = []
-
-    def get_last_frame(self) -> Optional[Image.Image]:
-        """Get the most recent rendered frame."""
-        return self.frames[-1] if self.frames else None
 
 
 def render_simulation(
@@ -135,58 +92,35 @@ def render_simulation(
     verbose: bool = True,
     track_jellyfish: bool = False,
 ) -> Tuple[Renderer, Optional[List[Tuple[float, float]]]]:
-    """Run simulation and render all frames with multi-material support.
+    """Run simulation loop, rendering each frame.
 
-    Args:
-        solver: MPMSolver instance
-        n_frames: Number of frames to simulate
-        render_config: Rendering configuration
-        water_level: Y-coordinate of water surface
-        verbose: Print progress
-        track_jellyfish: If True, record jellyfish center-of-mass over time
-
-    Returns:
-        Tuple of (Renderer with frames, optional list of (x, y) CoM positions)
+    Returns (renderer, optional jellyfish CoM trajectory).
     """
     renderer = Renderer(render_config)
-    jellyfish_trajectory = [] if track_jellyfish else None
-
-    # Check if solver has material support
-    has_materials = hasattr(solver, 'get_particle_materials')
+    trajectory = [] if track_jellyfish else None
 
     for frame in range(n_frames):
-        # Get current state
         positions = solver.get_particle_positions()
+        materials = solver.get_particle_materials()
+        actuators = solver.get_particle_actuators()
 
-        # Get materials and actuators if available
-        materials = solver.get_particle_materials() if has_materials else None
-        actuators = solver.get_particle_actuators() if has_materials else None
+        renderer.render_frame(positions, frame,
+                              materials=materials, actuators=actuators,
+                              water_level=water_level)
 
-        # Render frame
-        renderer.render_frame(
-            positions, frame,
-            materials=materials,
-            actuators=actuators,
-            water_level=water_level,
-        )
+        if track_jellyfish:
+            trajectory.append(solver.get_jellyfish_center_of_mass())
 
-        # Track jellyfish center of mass
-        if track_jellyfish and hasattr(solver, 'get_jellyfish_center_of_mass'):
-            com = solver.get_jellyfish_center_of_mass()
-            jellyfish_trajectory.append(com)
-
-        # Advance simulation
         solver.step()
 
         if verbose and (frame + 1) % 10 == 0:
-            if track_jellyfish and jellyfish_trajectory:
-                com = jellyfish_trajectory[-1]
-                print(f"Frame {frame + 1}/{n_frames} | Jellyfish CoM: ({com[0]:.3f}, {com[1]:.3f})")
-            else:
-                print(f"Frame {frame + 1}/{n_frames}")
+            msg = f"Frame {frame + 1}/{n_frames}"
+            if trajectory:
+                com = trajectory[-1]
+                msg += f" | Jellyfish CoM: ({com[0]:.3f}, {com[1]:.3f})"
+            print(msg)
 
-    # Save GIF if configured
     if render_config is None or render_config.save_gif:
         renderer.save_gif()
 
-    return renderer, jellyfish_trajectory
+    return renderer, trajectory
