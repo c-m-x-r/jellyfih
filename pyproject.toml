@@ -8,6 +8,9 @@ dependencies = [
     "taichi>=1.7.0; platform_machine == 'x86_64'",
     "numpy>=1.24.0",
     "pillow>=10.0.0",
+    "imageio[ffmpeg]>=2.37.2",
+    "opencv-python>=4.13.0.92",
+    "matplotlib>=3.10.8",
 ]
 
 [project.scripts]
@@ -15,3 +18,7 @@ jellys = "jellys.main:main"
 
 [tool.uv]
 package = true
+
+[tool.setuptools.packages.find]
+include = ["jellys*"]  # Only look for the jellys package
+exclude = ["output*"]   # Explicitly ignore your simulation results
