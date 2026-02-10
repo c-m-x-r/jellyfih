@@ -125,7 +125,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     spacing = 1.0 / (grid_res * 2.0)
     
     # Create ranges with a half-spacing buffer so we don't spawn ON the wall
-    margin = spacing * 2
+    margin = spacing * 3
     wx = np.arange(margin, 1.0 - margin, spacing)
     wy = np.arange(margin, 1.0 - margin, spacing) # Fill to top
     

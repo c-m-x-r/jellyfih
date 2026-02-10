@@ -61,15 +61,12 @@ def substep():
 
     # 2. P2G
     for m, p in x:
-        # Skip dead/invalid particles
         if material[m, p] < 0:
-            continue
-        if x[m, p][0] < 0.01 or x[m, p][0] > 0.99:
-            continue
-        if x[m, p][1] < 0.01 or x[m, p][1] > 0.99:
             continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
+        if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2:
+            continue
         fx = x[m, p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
         F[m, p] = (ti.Matrix.identity(float, 2) + dt * C[m, p]) @ F[m, p]
@@ -134,32 +131,33 @@ def substep():
 
     # 4. G2P
     for m, p in x:
-        # Skip dead/invalid particles (need margin from edges for stencil)
         if material[m, p] < 0:
-            continue
-        if x[m, p][0] < 0.03 or x[m, p][0] > 0.97:
-            continue
-        if x[m, p][1] < 0.03 or x[m, p][1] > 0.97:
             continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
-        fx = x[m, p] * inv_dx - base.cast(float)
-        w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
-        new_v = ti.Vector.zero(float, 2)
-        new_C = ti.Matrix.zero(float, 2, 2)
-        for i, j in ti.static(ti.ndrange(3, 3)):
-            dpos = ti.Vector([i, j]).cast(float) - fx
-            g_v = grid_v[m, base + ti.Vector([i, j])]
-            weight = w[i][0] * w[j][1]
-            new_v += weight * g_v
-            new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
-        v[m, p], C[m, p] = new_v, new_C
+        in_bounds = (base[0] >= 0 and base[1] >= 0 and
+                     base[0] < n_grid - 2 and base[1] < n_grid - 2)
 
-        # Gravity on all active particles — hydrostatic pressure fills voids
-        if material[m, p] >= 0:
-            v[m, p][1] -= dt * gravity
+        if in_bounds:
+            fx = x[m, p] * inv_dx - base.cast(float)
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
+            new_v = ti.Vector.zero(float, 2)
+            new_C = ti.Matrix.zero(float, 2, 2)
+            for i, j in ti.static(ti.ndrange(3, 3)):
+                dpos = ti.Vector([i, j]).cast(float) - fx
+                g_v = grid_v[m, base + ti.Vector([i, j])]
+                weight = w[i][0] * w[j][1]
+                new_v += weight * g_v
+                new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
+            v[m, p], C[m, p] = new_v, new_C
 
+        # Gravity and advection for ALL active particles (not just in-bounds)
+        v[m, p][1] -= dt * gravity
         x[m, p] += dt * v[m, p]
+
+        # Clamp to domain (prevent escape)
+        for d in ti.static(range(2)):
+            x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
 
 
 @ti.kernel
