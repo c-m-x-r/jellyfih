@@ -2,11 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
 import matplotlib.patches as patches
+from scipy.spatial import cKDTree
 
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.15   # Width of the central rigid payload
 PAYLOAD_HEIGHT = 0.1   # Height of the payload
 DENSITY_RES = 128      # Grid resolution for rasterizing particles (higher = more particles)
+DEFAULT_SPAWN = np.array([0.5, 0.7])  # Default spawn position in normalized coords
 
 def cubic_bezier(p0, p1, p2, p3, t):
     """Returns a point on the cubic Bezier curve at time t."""
@@ -26,10 +28,14 @@ def get_normals_2d(points):
     norm[norm == 0] = 1
     return normals / norm
 
-def generate_phenotype(genome, n_particles_target=None):
+def generate_phenotype(genome, spawn_offset=None):
     """
     Converts a CMA-ES genome vector into particle positions and materials.
-    
+
+    Args:
+        genome: 9-element vector defining bell shape
+        spawn_offset: [x, y] position for payload center (default: [0.5, 0.7])
+
     Genome Vector Format (9 genes):
     [0] cp1_x: Control Point 1 X (relative to start)
     [1] cp1_y: Control Point 1 Y (relative to start)
@@ -40,7 +46,13 @@ def generate_phenotype(genome, n_particles_target=None):
     [6] t_base: Thickness at connection point
     [7] t_mid:  Thickness at middle of bell
     [8] t_tip:  Thickness at tip of bell
+
+    Returns:
+        positions: (N, 2) array of particle positions
+        materials: (N,) array of material IDs (1=jelly, 2=payload)
     """
+    if spawn_offset is None:
+        spawn_offset = DEFAULT_SPAWN
     
     # 1. Define Key Points
     # Start point is fixed at the corner of the payload
@@ -106,27 +118,107 @@ def generate_phenotype(genome, n_particles_target=None):
     pgx, pgy = np.meshgrid(px, py)
     payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
     
-    # 7. Combine & Normalize
+    # 7. Combine & Apply spawn offset
     # Material ID: 0 = Water (not here), 1 = Jelly (Soft), 2 = Payload (Rigid)
-    
-    # Offset everything so Payload center is at e.g., (0.5, 0.8) in Taichi space
-    OFFSET = np.array([0.5, 0.7]) 
-    
+    offset = np.array(spawn_offset)
+
     final_pos = []
     final_mat = []
-    
+
     if len(all_soft) > 0:
-        final_pos.append(all_soft + OFFSET)
-        final_mat.append(np.ones(len(all_soft)) * 1) # Mat 1 = Jelly
-        
+        final_pos.append(all_soft + offset)
+        final_mat.append(np.ones(len(all_soft), dtype=int) * 1)  # Mat 1 = Jelly
+
     if len(payload_particles) > 0:
-        final_pos.append(payload_particles + OFFSET)
-        final_mat.append(np.ones(len(payload_particles)) * 2) # Mat 2 = Rigid
-        
+        final_pos.append(payload_particles + offset)
+        final_mat.append(np.ones(len(payload_particles), dtype=int) * 2)  # Mat 2 = Rigid
+
     if len(final_pos) > 0:
-        return np.vstack(final_pos), np.concatenate(final_mat)
+        return np.vstack(final_pos), np.concatenate(final_mat).astype(int)
     else:
-        return np.array([]), np.array([])
+        return np.zeros((0, 2)), np.zeros(0, dtype=int)
+
+def fill_tank(genome, n_particles, spawn_offset=None, water_margin=0.02):
+    """
+    Creates a complete particle set: robot + background water, padded to fixed size.
+
+    Args:
+        genome: 9-element vector defining bell shape
+        n_particles: Target total particle count (fixed for GPU tensors)
+        spawn_offset: [x, y] position for payload center (default: [0.5, 0.7])
+        water_margin: Exclusion radius around robot particles
+
+    Returns:
+        positions: (n_particles, 2) array - padded with [-1, -1] for unused slots
+        materials: (n_particles,) array - 0=water, 1=jelly, 2=payload, -1=dead
+    """
+    if spawn_offset is None:
+        spawn_offset = DEFAULT_SPAWN
+
+    # 1. Generate robot particles
+    robot_pos, robot_mat = generate_phenotype(genome, spawn_offset)
+    n_robot = len(robot_pos)
+
+    # 2. Generate water grid — fill close to walls (wall boundary is ~3*dx ≈ 0.024)
+    tank_margin = 0.03
+    water_res = int(np.sqrt(n_particles) * 0.95)  # Fill 94% of domain width
+    wx = np.linspace(tank_margin, 1.0 - tank_margin, water_res)
+    wy = np.linspace(tank_margin, 1.0 - tank_margin, water_res)
+    wgx, wgy = np.meshgrid(wx, wy)
+    water_candidates = np.vstack([wgx.ravel(), wgy.ravel()]).T
+
+    # 3. Remove water particles that overlap with robot (boolean subtraction)
+    if n_robot > 0:
+        tree = cKDTree(robot_pos)
+        # Find water particles too close to any robot particle
+        distances, _ = tree.query(water_candidates, k=1)
+        keep_mask = distances > water_margin
+        water_pos = water_candidates[keep_mask]
+    else:
+        water_pos = water_candidates
+
+    n_water = len(water_pos)
+
+    # 4. Combine robot and water
+    total_active = n_robot + n_water
+
+    # 5. Allocate fixed-size arrays
+    positions = np.full((n_particles, 2), -1.0, dtype=np.float32)
+    materials = np.full(n_particles, -1, dtype=np.int32)
+
+    # 6. Fill with robot particles first (they're more important)
+    if n_robot > 0:
+        positions[:n_robot] = robot_pos
+        materials[:n_robot] = robot_mat
+
+    # 7. Fill remaining slots with water (up to capacity)
+    water_slots = min(n_water, n_particles - n_robot)
+    if water_slots > 0:
+        positions[n_robot:n_robot + water_slots] = water_pos[:water_slots]
+        materials[n_robot:n_robot + water_slots] = 0  # Mat 0 = Water
+
+    return positions, materials, {
+        'n_robot': n_robot,
+        'n_water': water_slots,
+        'n_total': n_robot + water_slots,
+        'n_dead': n_particles - (n_robot + water_slots)
+    }
+
+
+def random_genome():
+    """Generate a random but reasonable genome for testing."""
+    genome = np.zeros(9)
+    genome[0] = np.random.uniform(0.0, 0.15)   # cp1_x positive
+    genome[1] = np.random.uniform(-0.05, 0.05) # cp1_y
+    genome[2] = np.random.uniform(0.05, 0.2)   # cp2_x
+    genome[3] = np.random.uniform(-0.1, 0.05)  # cp2_y
+    genome[4] = np.random.uniform(0.1, 0.25)   # end_x (width)
+    genome[5] = np.random.uniform(-0.3, -0.1)  # end_y (height/depth, negative = down)
+    genome[6] = np.random.uniform(0.02, 0.06)  # t_base
+    genome[7] = np.random.uniform(0.02, 0.08)  # t_mid
+    genome[8] = np.random.uniform(0.005, 0.02) # t_tip
+    return genome
+
 
 def visualize_population(n_samples=4):
     """Generates N random genomes and displays them."""
