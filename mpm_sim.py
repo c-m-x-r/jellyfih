@@ -1,33 +1,42 @@
 import taichi as ti
 import time
-import numpy as np # Needed for the final export
-import cv2 
+import numpy as np
+import cv2
+import math
 
 ti.set_logging_level(ti.ERROR)
-# Use CPU for testing when GPU unavailable, fallback to Vulkan/GPU when available
 ti.init(arch=ti.cuda)  # Use ti.cuda or ti.gpu when GPU available
 
 # --- SIMULATION SETTINGS ---
-# quality=1 for fast iteration, quality=2 for detailed vortex capture
+# n_instances: CMA-ES population size. Minimum ~10 for 9-gene genome.
+# Fewer instances = more particles per sim at same VRAM cost.
 n_instances = 16
 quality = 1  # 1=low-res (128 grid), 2=high-res (256 grid)
-n_particles = 36000 * quality**2
+n_particles = 70000
 n_grid = 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 5e-5 / quality  # Smaller timestep for stability with stiffer fluid
-p_vol, p_rho = (dx * 0.5) ** 2, 1
+p_vol = (dx * 0.5) ** 2
+p_rho = 1
 p_mass = p_vol * p_rho
 E, nu = 0.1e4, 0.2
 mu_0, lambda_0 = E / (2 * (1 + nu)), E * nu / ((1 + nu) * (1 - 2 * nu))
-water_lambda = 12000.0  # Much higher bulk modulus for water to resist compression
-gravity = 1.0  # Uniform gravity — creates hydrostatic pressure that fills voids
+water_lambda = 4000.0  # Much higher bulk modulus for water to resist compression
+gravity = 10.0  # Uniform gravity — creates hydrostatic pressure that fills voids
 
 # --- RECORDING SETTINGS ---
 frames = 400  # Frames to record
 substeps_per_frame = 50  # Physics steps per frame
-video_buffer = ti.field(dtype=float, shape=(frames, 1024, 1024, 3))
+warmup_steps = 200  # Let hydrostatic pressure equilibrate before recording
+
+# --- RENDERING SETTINGS ---
+grid_side = int(math.ceil(math.sqrt(n_instances)))
+video_res = 1024
+res_sub = video_res // grid_side  # Pixels per instance tile
+
 print(f"Allocating {n_instances} instances with {n_particles} particles each...")
 print(f"Total Particles: {n_instances * n_particles:,}")
+print(f"Grid: {n_grid}x{n_grid}, approx PPC: {n_particles / (0.81 * n_grid**2):.1f}")
 
 # Physics Fields
 x = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
@@ -39,15 +48,12 @@ Jp = ti.field(dtype=float, shape=(n_instances, n_particles))
 grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))
 grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid))
 
-# --- HISTORY BUFFER (The VRAM Tape) ---
-# Shape: [Time, Instance, Particle]
-history_x = ti.Vector.field(2, dtype=float, shape=(frames, n_instances, n_particles))
-
+# Single-frame render buffer (~12 MB instead of ~6.5 GB for history + video buffers)
+frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
 
 @ti.kernel
 def substep():
-    # ... (Your existing physics code here - NO CHANGES NEEDED) ...
     # 1. Reset Grid
     for m, i, j in grid_m:
         grid_v[m, i, j] = [0, 0]
@@ -58,9 +64,9 @@ def substep():
         # Skip dead/invalid particles
         if material[m, p] < 0:
             continue
-        if x[m, p][0] < 0.02 or x[m, p][0] > 0.98:
+        if x[m, p][0] < 0.01 or x[m, p][0] > 0.99:
             continue
-        if x[m, p][1] < 0.02 or x[m, p][1] > 0.98:
+        if x[m, p][1] < 0.01 or x[m, p][1] > 0.99:
             continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
@@ -108,19 +114,16 @@ def substep():
     for m, i, j in grid_m:
         if grid_m[m, i, j] > 0:
             grid_v[m, i, j] /= grid_m[m, i, j]
-            # NO global gravity here - applied per-particle below
 
-            # Light damping near boundaries (5% zone, 95% velocity retention)
+            # Side-only damping (left/right walls absorb lateral waves)
+            # No top/bottom damping — bottom must support hydrostatic pressure,
+            # damping there fights gravity and causes particles to sag into the wall
             damp_cells = n_grid // 20
             damp = 1.0
             if i < damp_cells:
                 damp *= 0.95 + 0.05 * i / damp_cells
             if i > n_grid - damp_cells:
                 damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells
-            if j < damp_cells:
-                damp *= 0.95 + 0.05 * j / damp_cells
-            if j > n_grid - damp_cells:
-                damp *= 0.95 + 0.05 * (n_grid - j) / damp_cells
             grid_v[m, i, j] *= damp
 
             # Hard boundary conditions (solid walls)
@@ -158,73 +161,50 @@ def substep():
 
         x[m, p] += dt * v[m, p]
 
-@ti.kernel
-def initialize():
-    for m, i in x:
-        # Instance-based layout
-        if i < n_particles // 2:
-            # Bottom Layer: "Water"
-            x[m, i] = [ti.random() * 0.4 + 0.3, ti.random() * 0.2 + 0.05]
-            material[m, i] = 0 # Material 0 (Water)
-            v[m, i] = [0, 0]
-        else:
-            # Top Layer: "Dense Fluid"
-            x[m, i] = [ti.random() * 0.4 + 0.3, ti.random() * 0.2 + 0.4]
-            material[m, i] = 1 # Material 1 (Dense)
-            v[m, i] = [0, 1.0] # Initial downward punch
-        
-        F[m, i] = ti.Matrix.identity(float, 2)
-        Jp[m, i] = 1
 
-# --- RECORDING KERNEL ---
 @ti.kernel
-def record_frame(f: int):
-    # This copies data from the 'x' field to 'history_x'
-    # It stays entirely on the GPU VRAM.
+def clear_frame_buffer():
+    for i, j, c in frame_buffer:
+        frame_buffer[i, j, c] = 1.0
+
+
+@ti.kernel
+def render_frame(p_res_sub: int, p_grid_side: int, radius: float):
+    """Render current particle state directly from x[] to frame_buffer (GPU-only)."""
     for m, p in x:
-        history_x[f, m, p] = x[m, p]
-
-@ti.kernel
-def clear_buffer_to_white():
-    for f, i, j, c in video_buffer:
-        video_buffer[f, i, j, c] = 1.0
-
-@ti.kernel
-def render_all_frames(res_sub: int, grid_side: int, radius: float):
-    for f, m, p in history_x:
-        pos = history_x[f, m, p]
+        pos = x[m, p]
         mat = material[m, p]
 
         # Skip dead particles (material -1 or position at -1,-1)
         if mat < 0 or pos[0] < 0:
             continue
 
-        row, col = m // grid_side, m % grid_side
+        row, col = m // p_grid_side, m % p_grid_side
 
-        center_x = (pos[0] + col) * res_sub
-        center_y = ((1.0 - pos[1]) + row) * res_sub
+        center_x = (pos[0] + col) * p_res_sub
+        center_y = ((1.0 - pos[1]) + row) * p_res_sub
 
         low_x, high_x = int(center_x - radius), int(center_x + radius)
         low_y, high_y = int(center_y - radius), int(center_y + radius)
 
         for px in range(low_x, high_x + 1):
             for py in range(low_y, high_y + 1):
-                if 0 <= px < 1024 and 0 <= py < 1024:
+                if 0 <= px < video_res and 0 <= py < video_res:
                     dist_sq = (px - center_x)**2 + (py - center_y)**2
 
                     if dist_sq <= radius**2:
                         if mat == 0:  # Water: Blue
-                            video_buffer[f, py, px, 0] = 0.2
-                            video_buffer[f, py, px, 1] = 0.5
-                            video_buffer[f, py, px, 2] = 0.9
+                            frame_buffer[py, px, 0] = 0.2
+                            frame_buffer[py, px, 1] = 0.5
+                            frame_buffer[py, px, 2] = 0.9
                         elif mat == 1:  # Jelly: Cyan
-                            video_buffer[f, py, px, 0] = 0.1
-                            video_buffer[f, py, px, 1] = 0.9
-                            video_buffer[f, py, px, 2] = 0.9
+                            frame_buffer[py, px, 0] = 0.1
+                            frame_buffer[py, px, 1] = 0.9
+                            frame_buffer[py, px, 2] = 0.9
                         elif mat == 2:  # Payload: Dark red
-                            video_buffer[f, py, px, 0] = 0.8
-                            video_buffer[f, py, px, 1] = 0.2
-                            video_buffer[f, py, px, 2] = 0.2
+                            frame_buffer[py, px, 0] = 0.8
+                            frame_buffer[py, px, 1] = 0.2
+                            frame_buffer[py, px, 2] = 0.2
 
 
 @ti.kernel
@@ -237,71 +217,65 @@ def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.n
         F[instance, p] = ti.Matrix.identity(float, 2)
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
+
+
 def main():
-    initialize()
-    print("Starting simulation loop (Recording to VRAM)...")
-    
-    # Warmup
-    for _ in range(10): substep()
+    from make_jelly import fill_tank, random_genome
+
+    # Fill tank with water + random jellyfish morphology
+    genome = random_genome()
+    positions, materials, info = fill_tank(genome, n_particles)
+    print(f"Tank: {info['n_robot']} robot + {info['n_water']} water + {info['n_dead']} dead")
+
+    # Load identical initial state into all instances
+    for m in range(n_instances):
+        load_particles(m, positions, materials)
+
+    # Set up streaming video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter('gpu_rendered_sim.mp4', fourcc, 30.0, (video_res, video_res))
+
+    # Warmup: let hydrostatic pressure equilibrate
+    # Sound speed = sqrt(lambda/rho) ≈ 110, domain traversal ≈ 160 steps
+    print(f"Warmup: {warmup_steps} substeps...")
+    for _ in range(warmup_steps):
+        substep()
     ti.sync()
-    
+
+    print("Simulating + rendering (streaming)...")
     start_wall_time = time.time()
-    
+
     for i in range(frames):
         for _ in range(substeps_per_frame):
             substep()
-        record_frame(i)
+
+        # Render on GPU, transfer single frame (~12 MB) to CPU, encode
+        clear_frame_buffer()
+        render_frame(res_sub, grid_side, 1)
+        frame_np = frame_buffer.to_numpy()
+        frame_u8 = (np.clip(frame_np, 0.0, 1.0) * 255).astype(np.uint8)
+        out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
+
         if i % 10 == 0:
-            print(f"Frame {i}/{frames} recorded.")
+            print(f"Frame {i}/{frames}")
 
     ti.sync()
-    
-# Caculate and Display Timing Metrics
+    out.release()
+
+    # Performance metrics
     end_wall_time = time.time()
     total_time = end_wall_time - start_wall_time
-
     fps = frames / total_time
-    fps_per_sim = fps / n_instances
-    fps_per_particle = fps / (n_instances * n_particles)
 
-    print("\n" + "="*40)
+    print(f"\n{'='*40}")
     print(f"SIMULATION PERFORMANCE REPORT")
-    print("-" * 40)
-    print(f"Total Simulation Time: {total_time:.4f} s")
-    print(f"Final frames/s:        {fps:.2f} fps")
-    print(f"frames/s/simulation:   {fps_per_sim:.4f} fps/sim")
-    print(f"fps/particle:          {fps_per_particle:.10f} fps/p")
-    print("="*40 + "\n")
+    print(f"{'-'*40}")
+    print(f"Total Time:            {total_time:.4f} s")
+    print(f"Frames/s:              {fps:.2f}")
+    print(f"Frames/s/instance:     {fps / n_instances:.4f}")
+    print(f"{'='*40}")
+    print(f"Video saved: gpu_rendered_sim.mp4")
 
-
-# NEW: Rendering Stage
-    print("GPU Rendering density fields...")
-    # Exposure is lower (0.005) because the larger radius accumulates more light per pixel
-    clear_buffer_to_white()
-    render_all_frames(256, 4, 1) 
-    ti.sync()
-
-    print("Exporting video frames...")
-    
-    # Move float buffer to CPU
-    # This array is (Frames, H, W, 3) of floats 0.0 -> >1.0
-    np_video = video_buffer.to_numpy()
-    
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter('gpu_rendered_sim.mp4', fourcc, 30.0, (1024, 1024))
-    
-    for f in range(frames):
-        # [CHANGE 4] Tone mapping (Float -> uint8)
-        # We clip values to 0.0-1.0 to handle bright spots (saturation)
-        # Then multiply by 255 and cast to uint8
-        frame_float = np_video[f]
-        frame_u8 = (np.clip(frame_float, 0.0, 1.0) * 255).astype(np.uint8)
-        
-        # Convert RGB to BGR for OpenCV
-        out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
-        
-    out.release()
-    print("Video saved!")
 
 if __name__ == "__main__":
     main()

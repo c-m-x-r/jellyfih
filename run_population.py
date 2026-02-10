@@ -6,7 +6,7 @@ This script:
 1. Generates N random genomes (one per simulation instance)
 2. Fills tanks with water + robot particles for each
 3. Loads into MPM simulation
-4. Runs physics and renders video showing all morphologies
+4. Runs physics and streams rendered video showing all morphologies
 """
 
 import numpy as np
@@ -55,55 +55,46 @@ def load_population_to_gpu(all_positions, all_materials):
     print("GPU loading complete.")
 
 
-def run_simulation():
-    """Run physics simulation and record frames."""
-    print("Starting simulation...")
+def run_simulation_streaming(output_path="population_sim.mp4"):
+    """Run physics simulation with per-frame GPU render streamed to video.
 
-    # Warmup
-    for _ in range(10):
+    Renders each frame on GPU, transfers a single 12 MB frame to CPU,
+    and encodes immediately — no history buffer or video buffer needed.
+    """
+    # Warmup: let hydrostatic pressure equilibrate
+    print(f"Warmup: {sim.warmup_steps} substeps...")
+    for _ in range(sim.warmup_steps):
         sim.substep()
     sim.ti.sync()
 
+    # Set up video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, 30.0, (sim.video_res, sim.video_res))
+
+    print(f"Simulating + rendering (streaming) {sim.frames} frames...")
     start_time = time.time()
 
     for frame in range(sim.frames):
         for _ in range(sim.substeps_per_frame):
             sim.substep()
-        sim.record_frame(frame)
+
+        # Render on GPU, transfer single frame to CPU, encode
+        sim.clear_frame_buffer()
+        sim.render_frame(sim.res_sub, sim.grid_side, 1.5)
+        frame_np = sim.frame_buffer.to_numpy()
+        frame_u8 = (np.clip(frame_np, 0.0, 1.0) * 255).astype(np.uint8)
+        out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
 
         if frame % 50 == 0:
             print(f"  Frame {frame}/{sim.frames}")
 
     sim.ti.sync()
-    elapsed = time.time() - start_time
-
-    print(f"Simulation complete: {sim.frames} frames in {elapsed:.2f}s ({sim.frames/elapsed:.1f} fps)")
-    return elapsed
-
-
-def render_and_save(output_path="population_sim.mp4"):
-    """Render all frames and save to video."""
-    print("Rendering frames on GPU...")
-
-    sim.clear_buffer_to_white()
-    # 4x4 grid layout, 256 pixels per cell
-    sim.render_all_frames(256, 4, 1.5)
-    sim.ti.sync()
-
-    print(f"Saving video to {output_path}...")
-
-    np_video = sim.video_buffer.to_numpy()
-
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, 30.0, (1024, 1024))
-
-    for f in range(sim.frames):
-        frame_float = np_video[f]
-        frame_u8 = (np.clip(frame_float, 0.0, 1.0) * 255).astype(np.uint8)
-        out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
-
     out.release()
+
+    elapsed = time.time() - start_time
+    print(f"Simulation + render: {sim.frames} frames in {elapsed:.2f}s ({sim.frames/elapsed:.1f} fps)")
     print(f"Video saved: {output_path}")
+    return elapsed
 
 
 def visualize_genomes(genomes, output_path="population_preview.png"):
@@ -122,7 +113,6 @@ def visualize_genomes(genomes, output_path="population_preview.png"):
         ax = axes[i]
 
         if len(pos) > 0:
-            # Water would be shown but we only have robot here
             jelly = pos[mat == 1]
             payload = pos[mat == 2]
 
@@ -164,11 +154,8 @@ def main():
     # Load to GPU
     load_population_to_gpu(all_pos, all_mat)
 
-    # Run physics
-    elapsed = run_simulation()
-
-    # Render and save
-    render_and_save()
+    # Run physics + streaming render
+    elapsed = run_simulation_streaming()
 
     # Summary
     print("\n" + "=" * 50)
