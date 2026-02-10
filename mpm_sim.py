@@ -21,12 +21,11 @@ E, nu = 0.1e4, 0.2
 mu_0, lambda_0 = E / (2 * (1 + nu)), E * nu / ((1 + nu) * (1 - 2 * nu))
 water_lambda = 12000.0  # Much higher bulk modulus for water to resist compression
 gravity = 1.0  # Uniform gravity — creates hydrostatic pressure that fills voids
-particle_bound = 3 * dx  # Stencil safety zone, matches wall boundary
 
 # --- RECORDING SETTINGS ---
 frames = 400  # Frames to record
 substeps_per_frame = 50  # Physics steps per frame
-frame_buffer = ti.field(dtype=float, shape=(1024, 1024, 3))  # Single frame: ~12MB vs ~5GB
+video_buffer = ti.field(dtype=float, shape=(frames, 1024, 1024, 3))
 print(f"Allocating {n_instances} instances with {n_particles} particles each...")
 print(f"Total Particles: {n_instances * n_particles:,}")
 
@@ -59,9 +58,9 @@ def substep():
         # Skip dead/invalid particles
         if material[m, p] < 0:
             continue
-        if x[m, p][0] < particle_bound or x[m, p][0] > 1.0 - particle_bound:
+        if x[m, p][0] < 0.02 or x[m, p][0] > 0.98:
             continue
-        if x[m, p][1] < particle_bound or x[m, p][1] > 1.0 - particle_bound:
+        if x[m, p][1] < 0.02 or x[m, p][1] > 0.98:
             continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
@@ -109,8 +108,22 @@ def substep():
     for m, i, j in grid_m:
         if grid_m[m, i, j] > 0:
             grid_v[m, i, j] /= grid_m[m, i, j]
+            # NO global gravity here - applied per-particle below
 
-            # Rigid wall boundaries (no sponge damping — closed tank)
+            # Light damping near boundaries (5% zone, 95% velocity retention)
+            damp_cells = n_grid // 20
+            damp = 1.0
+            if i < damp_cells:
+                damp *= 0.95 + 0.05 * i / damp_cells
+            if i > n_grid - damp_cells:
+                damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells
+            if j < damp_cells:
+                damp *= 0.95 + 0.05 * j / damp_cells
+            if j > n_grid - damp_cells:
+                damp *= 0.95 + 0.05 * (n_grid - j) / damp_cells
+            grid_v[m, i, j] *= damp
+
+            # Hard boundary conditions (solid walls)
             if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
             if i > n_grid - 3 and grid_v[m, i, j][0] > 0: grid_v[m, i, j][0] = 0
             if j < 3 and grid_v[m, i, j][1] < 0: grid_v[m, i, j][1] = 0
@@ -121,9 +134,9 @@ def substep():
         # Skip dead/invalid particles (need margin from edges for stencil)
         if material[m, p] < 0:
             continue
-        if x[m, p][0] < particle_bound or x[m, p][0] > 1.0 - particle_bound:
+        if x[m, p][0] < 0.03 or x[m, p][0] > 0.97:
             continue
-        if x[m, p][1] < particle_bound or x[m, p][1] > 1.0 - particle_bound:
+        if x[m, p][1] < 0.03 or x[m, p][1] > 0.97:
             continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
@@ -172,41 +185,46 @@ def record_frame(f: int):
         history_x[f, m, p] = x[m, p]
 
 @ti.kernel
-def render_single_frame(f: int, res_sub: int, grid_side: int, radius: float):
-    """Render one frame from history_x into frame_buffer (stays on GPU)."""
-    # Clear to white
-    for i, j in ti.ndrange(1024, 1024):
-        frame_buffer[i, j, 0] = 1.0
-        frame_buffer[i, j, 1] = 1.0
-        frame_buffer[i, j, 2] = 1.0
-    # Paint particles
-    for m, p in ti.ndrange(n_instances, n_particles):
+def clear_buffer_to_white():
+    for f, i, j, c in video_buffer:
+        video_buffer[f, i, j, c] = 1.0
+
+@ti.kernel
+def render_all_frames(res_sub: int, grid_side: int, radius: float):
+    for f, m, p in history_x:
         pos = history_x[f, m, p]
         mat = material[m, p]
+
+        # Skip dead particles (material -1 or position at -1,-1)
         if mat < 0 or pos[0] < 0:
             continue
+
         row, col = m // grid_side, m % grid_side
+
         center_x = (pos[0] + col) * res_sub
         center_y = ((1.0 - pos[1]) + row) * res_sub
+
         low_x, high_x = int(center_x - radius), int(center_x + radius)
         low_y, high_y = int(center_y - radius), int(center_y + radius)
+
         for px in range(low_x, high_x + 1):
             for py in range(low_y, high_y + 1):
                 if 0 <= px < 1024 and 0 <= py < 1024:
                     dist_sq = (px - center_x)**2 + (py - center_y)**2
+
                     if dist_sq <= radius**2:
                         if mat == 0:  # Water: Blue
-                            frame_buffer[py, px, 0] = 0.2
-                            frame_buffer[py, px, 1] = 0.5
-                            frame_buffer[py, px, 2] = 0.9
+                            video_buffer[f, py, px, 0] = 0.2
+                            video_buffer[f, py, px, 1] = 0.5
+                            video_buffer[f, py, px, 2] = 0.9
                         elif mat == 1:  # Jelly: Cyan
-                            frame_buffer[py, px, 0] = 0.1
-                            frame_buffer[py, px, 1] = 0.9
-                            frame_buffer[py, px, 2] = 0.9
+                            video_buffer[f, py, px, 0] = 0.1
+                            video_buffer[f, py, px, 1] = 0.9
+                            video_buffer[f, py, px, 2] = 0.9
                         elif mat == 2:  # Payload: Dark red
-                            frame_buffer[py, px, 0] = 0.8
-                            frame_buffer[py, px, 1] = 0.2
-                            frame_buffer[py, px, 2] = 0.2
+                            video_buffer[f, py, px, 0] = 0.8
+                            video_buffer[f, py, px, 1] = 0.2
+                            video_buffer[f, py, px, 2] = 0.2
 
 
 @ti.kernel
@@ -256,22 +274,32 @@ def main():
     print("="*40 + "\n")
 
 
-# Render per-frame on GPU, transfer only 12MB/frame instead of 5GB bulk
-    print("GPU Rendering + encoding video...")
-    grid_side = int(np.ceil(np.sqrt(n_instances)))
-    res_sub = 1024 // grid_side
+# NEW: Rendering Stage
+    print("GPU Rendering density fields...")
+    # Exposure is lower (0.005) because the larger radius accumulates more light per pixel
+    clear_buffer_to_white()
+    render_all_frames(256, 4, 1) 
+    ti.sync()
 
+    print("Exporting video frames...")
+    
+    # Move float buffer to CPU
+    # This array is (Frames, H, W, 3) of floats 0.0 -> >1.0
+    np_video = video_buffer.to_numpy()
+    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter('gpu_rendered_sim.mp4', fourcc, 30.0, (1024, 1024))
-
+    
     for f in range(frames):
-        render_single_frame(f, res_sub, grid_side, 1.0)
-        frame_np = frame_buffer.to_numpy()  # ~12MB per transfer
-        frame_u8 = (np.clip(frame_np, 0.0, 1.0) * 255).astype(np.uint8)
+        # [CHANGE 4] Tone mapping (Float -> uint8)
+        # We clip values to 0.0-1.0 to handle bright spots (saturation)
+        # Then multiply by 255 and cast to uint8
+        frame_float = np_video[f]
+        frame_u8 = (np.clip(frame_float, 0.0, 1.0) * 255).astype(np.uint8)
+        
+        # Convert RGB to BGR for OpenCV
         out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
-        if f % 50 == 0:
-            print(f"  Rendered frame {f}/{frames}")
-
+        
     out.release()
     print("Video saved!")
 
