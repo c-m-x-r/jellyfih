@@ -159,9 +159,9 @@ def fill_tank(genome, n_particles, spawn_offset=None, water_margin=0.02):
     robot_pos, robot_mat = generate_phenotype(genome, spawn_offset)
     n_robot = len(robot_pos)
 
-    # 2. Generate water grid — fill close to walls (wall boundary is ~3*dx ≈ 0.024)
-    tank_margin = 0.03
-    water_res = int(np.sqrt(n_particles) * 0.95)  # Fill 94% of domain width
+    # 2. Generate water grid covering entire tank [0.05, 0.95] with margin from walls
+    tank_margin = 0.05
+    water_res = int(np.sqrt(n_particles) * 0.9)  # Approximate grid resolution
     wx = np.linspace(tank_margin, 1.0 - tank_margin, water_res)
     wy = np.linspace(tank_margin, 1.0 - tank_margin, water_res)
     wgx, wgy = np.meshgrid(wx, wy)
