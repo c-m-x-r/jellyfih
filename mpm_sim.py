@@ -5,7 +5,7 @@ import cv2
 import math
 
 ti.set_logging_level(ti.ERROR)
-ti.init(arch=ti.cuda)  # CUDA required for atomic_add performance
+ti.init(arch=ti.cuda)  # CUDA required for high performance
 
 # --- SIMULATION SETTINGS ---
 n_instances = 16
@@ -30,12 +30,20 @@ nu_jelly = 0.45
 mu_jelly = E_jelly / (2 * (1 + nu_jelly))
 lambda_jelly = E_jelly * nu_jelly / ((1 + nu_jelly) * (1 - 2 * nu_jelly))
 
+# Payload Properties (Rigid)
+# We set this 200x stiffer than the jelly to resist deformation
+E_payload = 2.0e4 
+nu_payload = 0.2
+mu_payload = E_payload / (2 * (1 + nu_payload))
+lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
+
 water_lambda = 4000.0
 gravity = 10.0
 
 # --- ACTUATION SETTINGS ---
-actuation_freq = 2.0   # Hz
-actuation_strength = 40.0 
+actuation_freq = 1.0   # Hz
+# High strength for Active Stress (Pressure)
+actuation_strength = 4000.0 
 
 # --- RECORDING SETTINGS ---
 frames = 100
@@ -67,10 +75,18 @@ frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
 @ti.kernel
 def substep():
-    # 0. Update Time & Actuation Phase
+    """Main Physics Step (P2G -> Grid -> G2P)."""
+    # 0. Update Time & Pulse
     current_time = sim_time[None]
-    actuation_phase = ti.math.sin(current_time * actuation_freq * 2 * math.pi)
-    contraction_factor = ti.max(0.0, actuation_phase) 
+    period = 1.0 / actuation_freq
+    phase = (current_time % period) / period
+    
+    # Asymmetric Activation: Fast Attack (0.2), Slow Decay
+    activation = 0.0
+    if phase < 0.2:
+        activation = phase / 0.2
+    else:
+        activation = ti.max(0.0, 1.0 - ((phase - 0.2) / 0.8))
 
     # 1. Reset Grid
     for m, i, j in grid_m:
@@ -91,18 +107,8 @@ def substep():
 
         # Material Logic
         mu, la = mu_0_base, lambda_0_base
-        h = ti.exp(10 * (1.0 - Jp[m, p]))
-        
-        if material[m, p] == 1:  # Jelly
+        if material[m, p] == 1 or material[m, p] == 3:  # Jelly or Muscle
             mu, la = mu_jelly * 0.3, lambda_jelly * 0.3
-            
-        elif material[m, p] == 3: # Muscle
-            mu, la = mu_jelly * 0.3, lambda_jelly * 0.3
-            # Active Contraction
-            dist_x = 0.5 - x[m, p][0]
-            dir_x = 1.0 if dist_x > 0 else -1.0
-            v[m, p][0] += dir_x * actuation_strength * contraction_factor * dt
-
         elif material[m, p] == 0:  # Water
             mu, la = 0.0, water_lambda
 
@@ -125,8 +131,16 @@ def substep():
         elif material[m, p] == 2:
             F[m, p] = U @ sig @ V.transpose()
             
+        # Stress Calculation
         stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
                  ti.Matrix.identity(float, 2) * la * J * (J - 1)
+        
+        # --- ACTIVE MUSCLE STRESS ---
+        if material[m, p] == 3:
+            # Contractile pressure (suction) causes bending
+            contractile_pressure = -actuation_strength * activation
+            stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
+
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
         affine = stress + p_mass * C[m, p]
         
@@ -180,8 +194,6 @@ def substep():
             x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
 
     sim_time[None] += dt
-
-
 # --- RENDERING PIPELINE (BIOLUMINESCENCE) ---
 
 @ti.func
@@ -227,13 +239,16 @@ def tone_map_and_encode():
 def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     """
     'Deep Sea Abyss' Renderer with Grid-Based Light Blue Gradient.
-    Uses atomic_add to accumulate light from particles.
     """
-    # Actuation pulse for visual sync
-    pulse = ti.sin(sim_time[None] * actuation_freq * 2 * math.pi)
+    # Re-calculate Pulse for visual sync in the renderer
+    period = 1.0 / actuation_freq
+    phase = (sim_time[None] % period) / period
+    activation = 0.0
+    if phase < 0.2:
+        activation = phase / 0.2
+    else:
+        activation = ti.max(0.0, 1.0 - ((phase - 0.2) / 0.8))
     
-    # Pre-calculate normalization factor for the gradient
-    # Avoid division by zero if grid_side is 1
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 
     for m, p in x:
@@ -243,45 +258,38 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
 
         # --- LIGHT CALCULATION ---
         vel = v[m, p].norm()
-        stress = 1.0 - Jp[m, p] # >0 means compressed
+        stress = 1.0 - Jp[m, p] 
         
         color = ti.Vector([0.0, 0.0, 0.0])
         intensity = 0.0
         
-        # Calculate instance position in the 2D grid for the gradient
         row_idx, col_idx = m // p_grid_side, m % p_grid_side
         norm_x = float(col_idx) / grid_norm_factor
         norm_y = float(row_idx) / grid_norm_factor
 
-        if mat == 0: # WATER (Sea Smoke)
+        if mat == 0: # WATER 
             if vel > 0.5:
-                color = ti.Vector([0.1, 0.2, 0.8]) # Deep Indigo
+                color = ti.Vector([0.1, 0.2, 0.8]) 
                 intensity = 0.015 * (vel / 10.0)
                 
-        elif mat == 1: # JELLY (Bioluminescent Skin Gradient)
-            # Hue: Shifts from Cyan (0.55) to Azure (0.65) across columns
-            # Saturation: Shifts from Pale (0.4) to Vivid (0.8) across rows
+        elif mat == 1: # JELLY 
             hue = 0.55 + (norm_x * 0.1)
             sat = 0.4 + (norm_y * 0.4)
             base_col = hsv2rgb(hue, sat, 0.9)
-            
-            # Glow on compression (stress)
             glow = ti.max(0.0, stress * 5.0)
             color = base_col + ti.Vector([glow, glow, glow])
             intensity = 0.05 + (glow * 0.2)
             
-        elif mat == 3: # MUSCLE (High Energy)
-            # Sync hue with skin, but keep it high-value/low-saturation for a "core" look
+        elif mat == 3: # MUSCLE (Visually syncs with activation)
             hue = 0.55 + (norm_x * 0.1)
-            activity = ti.max(0.0, pulse)
-            color = hsv2rgb(hue, 0.2, 1.0) + ti.Vector([activity, activity, activity])
-            intensity = 0.4 + (activity * 0.4)
+            color = hsv2rgb(hue, 0.2, 1.0) + ti.Vector([activation, activation, activation])
+            intensity = 0.4 + (activation * 0.4)
             
-        elif mat == 2: # PAYLOAD (Black Box)
-            color = ti.Vector([1.0, 0.2, 0.0]) # High-contrast Orange
+        elif mat == 2: # PAYLOAD
+            color = ti.Vector([1.0, 0.2, 0.0]) 
             intensity = 0.8
 
-        # --- SPLATTING (Atomic Accumulation) ---
+        # --- SPLATTING ---
         if intensity > 0.001:
             row, col = m // p_grid_side, m % p_grid_side
             center_x = (pos[0] + col) * p_res_sub
@@ -300,8 +308,6 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
                         if dist_norm < 1.0:
                             falloff = (1.0 - dist_norm)**4
                             val = color * intensity * falloff
-                            
-                            # Atomic add to the HDR frame_buffer
                             frame_buffer[py, px, 0] += val[0]
                             frame_buffer[py, px, 1] += val[1]
                             frame_buffer[py, px, 2] += val[2]
@@ -309,6 +315,7 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
 
 @ti.kernel
 def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
+    """Reset a specific instance with new particle data."""
     for p in range(n_particles):
         x[instance, p] = [pos_np[p, 0], pos_np[p, 1]]
         material[instance, p] = mat_np[p]
@@ -316,50 +323,6 @@ def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.n
         F[instance, p] = ti.Matrix.identity(float, 2)
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
-
-
-def main():
-    from make_jelly import fill_tank, random_genome
-
-    sim_time[None] = 0.0
-
-    genome = random_genome()
-    # Pass grid_res to match physics!
-    positions, materials, info = fill_tank(genome, n_particles, grid_res=int(n_grid/quality))
-    print(f"Tank: {info['n_robot']} robot + {info['n_water']} water + {info['n_dead']} dead")
-
-    for m in range(n_instances):
-        load_particles(m, positions, materials)
-
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter('biolum_sim.mp4', fourcc, 30.0, (video_res, video_res))
-
-    print(f"Warmup: {warmup_steps} substeps...")
-    for _ in range(warmup_steps):
-        substep()
-    ti.sync()
-
-    print("Simulating + rendering...")
-    
-    for i in range(frames):
-        for _ in range(substeps_per_frame):
-            substep()
-
-        # New Render Pipeline
-        clear_frame_buffer()                 # 1. Clear to Black
-        render_frame_abyss(res_sub, grid_side, 4) # 2. Accumulate Light
-        tone_map_and_encode()                # 3. Tone Map (HDR -> sRGB)
-        
-        frame_np = frame_buffer.to_numpy()
-        frame_u8 = (np.clip(frame_np, 0.0, 1.0) * 255).astype(np.uint8)
-        out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))
-
-        if i % 10 == 0:
-            print(f"Frame {i}/{frames}")
-
-    ti.sync()
-    out.release()
-    print("Done.")
 
 if __name__ == "__main__":
     main()
