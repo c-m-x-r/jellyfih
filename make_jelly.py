@@ -25,12 +25,13 @@ def get_normals_2d(points):
 def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     """
     Converts a CMA-ES genome vector into particle positions and materials.
-    Uses 9 genes. Muscle thickness is proportional to wall thickness.
+    Includes a 'Mesoglea Collar' to improve force transfer to the payload.
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
     
     # 1. Define Key Points
+    # The bell starts at the edge of the payload
     start_p = np.array([PAYLOAD_WIDTH / 2.0, 0.0]) 
     
     # Genes 0-5: Shape Control
@@ -39,7 +40,6 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     end_p = start_p + np.array([abs(genome[4]), genome[5]])
     
     # Genes 6-8: Thickness Control
-    # Thicker walls = Thicker muscles (but stiffer body)
     t_base = abs(genome[6])
     t_mid = abs(genome[7])
     t_tip = abs(genome[8])
@@ -51,87 +51,114 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # 3. Generate Envelope (Flesh + Muscle)
     normals = get_normals_2d(spine_points)
     t_profile = np.interp(t_steps, [0, 0.5, 1], [t_base, t_mid, t_tip])
-    
-    # Calculate half-thickness
     semi_thickness = t_profile[:, None] / 2.0
     
-    # Outer Curve (Skin)
     outer_curve = spine_points + normals * semi_thickness
-    
-    # Inner Curve (Cavity)
     inner_curve = spine_points - normals * semi_thickness
     
     # --- MUSCLE LAYER GENERATION ---
-    # Proportional Muscle Logic:
-    # The muscle layer is a fixed percentage of the local wall thickness.
-    # If evolution wants stronger muscles, it must evolve thicker walls.
+    spacing = 1.0 / (grid_res * 2.0)
+    min_base_muscle = spacing * 1.2
+    muscle_ratio = 0.25 
     
-    spacing = 1.0 / (grid_res * 2.0)           # Physical particle spacing
-    min_base_muscle = spacing * 1.2            # Minimum physical thickness
-    muscle_ratio = 0.25                        # Muscle is 25% of the wall thickness
-    
-    # Final muscle thickness
     effective_muscle_thick = min_base_muscle + (semi_thickness * muscle_ratio)
-    
-    # Cap muscle so it never consumes the entire wall (max 90% of half-thickness)
     effective_muscle_thick = np.minimum(effective_muscle_thick, semi_thickness * 0.9)
-    
-    # Define the "Muscle Interface"
     muscle_interface = spine_points - normals * (semi_thickness - effective_muscle_thick)
     
     # 4. Define Polygons
-    # Body Polygon: The entire solid shape (Outer -> Inner)
     body_polygon = np.vstack([outer_curve, inner_curve[::-1]])
-    
-    # Muscle Polygon: The active region (Interface -> Inner)
     muscle_polygon = np.vstack([muscle_interface, inner_curve[::-1]])
     
-    # 5. Rasterize (Fill Polygon with Particles)
-    min_x, min_y = np.min(body_polygon, axis=0)
-    max_x, max_y = np.max(body_polygon, axis=0)
-    
-    # Sync raster resolution with physics grid to prevent clumping
+    # --- RASTERIZATION SETUP ---
     raster_res = grid_res * 2 
+    
+    # Calculate bounding box for the entire robot (including potential collar)
+    min_x = min(np.min(body_polygon[:, 0]), -PAYLOAD_WIDTH) # Ensure we cover payload area
+    max_x = max(np.max(body_polygon[:, 0]), PAYLOAD_WIDTH)
+    min_y = min(np.min(body_polygon[:, 1]), 0.0)
+    max_y = max(np.max(body_polygon[:, 1]), PAYLOAD_HEIGHT)
+    
+    # Add padding for the collar
+    COLLAR_PADDING = 0.02
+    min_x -= COLLAR_PADDING
+    max_x += COLLAR_PADDING
     
     x_range = np.linspace(min_x, max_x, int((max_x-min_x)*raster_res))
     y_range = np.linspace(min_y, max_y, int((max_y-min_y)*raster_res))
     grid_x, grid_y = np.meshgrid(x_range, y_range)
     candidate_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
     
-    # Identify particles inside the Body
+    # 5. Generate ROBOT Parts
+    
+    # A. The Bell (Morphology)
     path_body = Path(body_polygon)
-    mask_body = path_body.contains_points(candidate_points)
-    body_points = candidate_points[mask_body]
+    mask_bell = path_body.contains_points(candidate_points)
     
-    # Identify particles inside the Muscle (subset of Body)
+    # B. The Muscle (Subset of Bell)
     path_muscle = Path(muscle_polygon)
-    mask_muscle = path_muscle.contains_points(body_points)
+    mask_muscle = path_muscle.contains_points(candidate_points)
     
-    # Assign Materials
-    # Default = 1 (Jelly)
-    particle_mats = np.ones(len(body_points), dtype=int)
-    # Muscle = 3 (Active)
-    particle_mats[mask_muscle] = 3
+    # C. The "Mesoglea Collar" (NEW FORCE TRANSFER HUB)
+    # Wraps the bottom 40% of the payload and extends slightly wider
+    collar_w = PAYLOAD_WIDTH + 0.03  # 1.5cm extra on each side
+    collar_h = PAYLOAD_HEIGHT * 0.40 
     
-    # 6. Mirror to create Left Side
-    if len(body_points) > 0:
-        left_pos = body_points.copy()
+    # Define Collar Box
+    mask_collar_box = (
+        (candidate_points[:, 0] >= 0) & # Right side only (mirroring handles left)
+        (candidate_points[:, 0] <= collar_w/2.0) &
+        (candidate_points[:, 1] >= 0) &
+        (candidate_points[:, 1] <= collar_h)
+    )
+    
+    # Define Payload Box (To subtract it)
+    mask_payload_space = (
+        (candidate_points[:, 0] <= PAYLOAD_WIDTH/2.0) &
+        (candidate_points[:, 1] <= PAYLOAD_HEIGHT)
+    )
+    
+    # Collar = Box MINUS Payload Space (Hollow Socket)
+    # We include a tiny overlap (epsilon) to ensure fusion
+    mask_collar = mask_collar_box & ~mask_payload_space
+    
+    # 6. Assemble Materials
+    # Initialize as 0 (Water/Nothing)
+    final_mats = np.zeros(len(candidate_points), dtype=int)
+    
+    # Apply Collar (Material 1 - Jelly)
+    final_mats[mask_collar] = 1
+    
+    # Apply Bell (Material 1 - Jelly) - Overwrites Collar if overlap (fine, same material)
+    final_mats[mask_bell] = 1
+    
+    # Apply Muscle (Material 3) - Overwrites Jelly
+    final_mats[mask_bell & mask_muscle] = 3
+    
+    # Extract active particles
+    active_mask = final_mats > 0
+    right_points = candidate_points[active_mask]
+    right_mats = final_mats[active_mask]
+    
+    # 7. Mirror to create Left Side
+    if len(right_points) > 0:
+        left_pos = right_points.copy()
         left_pos[:, 0] *= -1 
-        left_mats = particle_mats.copy()
+        left_mats = right_mats.copy()
         
-        all_soft_pos = np.vstack([body_points, left_pos])
-        all_soft_mats = np.concatenate([particle_mats, left_mats])
+        all_soft_pos = np.vstack([right_points, left_pos])
+        all_soft_mats = np.concatenate([right_mats, left_mats])
     else:
         all_soft_pos = np.zeros((0, 2))
         all_soft_mats = np.zeros(0, dtype=int)
 
-    # 7. Generate Payload (Rigid Body - Material 2)
+    # 8. Generate Payload (Rigid Body - Material 2)
+    # We regenerate this explicitly to ensure high resolution fill
     px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
     py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT*raster_res))
     pgx, pgy = np.meshgrid(px, py)
     payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
     
-    # 8. Combine & Apply spawn offset
+    # 9. Combine & Apply spawn offset
     offset = np.array(spawn_offset)
 
     final_pos = []
@@ -157,15 +184,13 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
 
-    # 1. Generate robot particles (passing grid_res for correct rasterization)
+    # 1. Generate robot particles
     robot_pos, robot_mat = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
     n_robot = len(robot_pos)
 
     # 2. Generate Water Grid
-    # Physics requires 2 particles per grid cell (dx/2 spacing).
     spacing = 1.0 / (grid_res * 2.0)
     
-    # Create ranges with a half-spacing buffer
     margin = spacing * 3
     wx = np.arange(margin, 1.0 - margin, spacing)
     wy = np.arange(margin, 1.0 - margin, spacing) 

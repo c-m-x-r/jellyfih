@@ -7,8 +7,8 @@ import mpm_sim as sim
 
 # --- EXPERIMENT SETTINGS ---
 # Defined here to control the experiment
-WARMUP_STEPS = 100
-FRAMES = 100
+WARMUP_STEPS = 10
+FRAMES = 400
 SUBSTEPS = 50
 
 def generate_population(n_instances, n_particles):
