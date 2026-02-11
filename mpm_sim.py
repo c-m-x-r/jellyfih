@@ -41,13 +41,14 @@ water_lambda = 4000.0
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
-actuation_freq = 0.8  # Hz
+actuation_freq = 1  # Hz
 actuation_strength = 10000.0 
 
 # Rendering
 video_res = 1024
 grid_side = int(math.ceil(math.sqrt(n_instances)))
 res_sub = video_res // grid_side
+visual_glow = ti.field(dtype=float, shape=(n_instances, n_particles))
 
 # --- GPU MEMORY ALLOCATION ---
 print(f"Allocating {n_instances} instances with {n_particles} particles each...")
@@ -84,12 +85,14 @@ def substep():
     period = 1.0 / actuation_freq
     phase = (current_time % period) / period
     
-    # Asymmetric Activation
     activation = 0.0
     if phase < 0.2:
-        activation = phase / 0.2
+        activation = phase / 0.2        # Ramp up fast (0.1s)
+    elif phase > 0.2:
+        activation = 1 / (80 * (phase - 0.19)) # Ramp down fast
     else:
-        activation = ti.max(0.0, 1.0 - ((phase - 0.2) / 0.8))
+        activation = 0.0
+
 
     # 1. Reset Grid
     for m, i, j in grid_m:
@@ -113,7 +116,7 @@ def substep():
         current_mass = p_mass  # Base mass
 
         if material[m, p] == 1 or material[m, p] == 3:  # Jelly or Muscle
-            mu, la = mu_jelly * 0.3, lambda_jelly * 0.3
+            mu, la = mu_jelly, lambda_jelly
         
         elif material[m, p] == 2:  # Payload (Heavy Rigid Body)
             mu, la = mu_payload, lambda_payload
@@ -215,6 +218,11 @@ def substep():
         
         for d in ti.static(range(2)):
             x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
+    
+    #5. Glowing Effect?
+    for m, p in x:
+        # Slow decay of the visual effect
+        visual_glow[m, p] = ti.max(visual_glow[m, p] * 0.9, ti.abs(1.0 - Jp[m, p]))
 
     sim_time[None] += dt
 
@@ -301,7 +309,7 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
             hue = 0.55 + (norm_x * 0.1)
             sat = 0.4 + (norm_y * 0.4)
             base_col = hsv2rgb(hue, sat, 0.9)
-            glow = ti.max(0.0, stress * 5.0)
+            glow = ti.abs(stress) * 2.0 + 0.1
             color = base_col + ti.Vector([glow, glow, glow])
             intensity = 0.05 + (glow * 0.2)
             
