@@ -4,8 +4,8 @@ from matplotlib.path import Path
 from scipy.spatial import cKDTree
 
 # --- CONFIGURATION ---
-PAYLOAD_WIDTH = 0.08  
-PAYLOAD_HEIGHT = 0.15   
+PAYLOAD_WIDTH = 0.1
+PAYLOAD_HEIGHT = 0.1   
 DEFAULT_SPAWN = np.array([0.5, 0.7]) 
 
 def cubic_bezier(p0, p1, p2, p3, t):
@@ -25,7 +25,7 @@ def get_normals_2d(points):
 def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     """
     Converts a CMA-ES genome vector into particle positions and materials.
-    Includes logic for a conditional 'Muscle' layer (Material 3).
+    Uses 9 genes. Muscle thickness is proportional to wall thickness.
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
@@ -33,10 +33,13 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # 1. Define Key Points
     start_p = np.array([PAYLOAD_WIDTH / 2.0, 0.0]) 
     
+    # Genes 0-5: Shape Control
     cp1 = start_p + np.array([abs(genome[0]), genome[1]])
     cp2 = start_p + np.array([abs(genome[2]), genome[3]])
     end_p = start_p + np.array([abs(genome[4]), genome[5]])
     
+    # Genes 6-8: Thickness Control
+    # Thicker walls = Thicker muscles (but stiffer body)
     t_base = abs(genome[6])
     t_mid = abs(genome[7])
     t_tip = abs(genome[8])
@@ -58,23 +61,22 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # Inner Curve (Cavity)
     inner_curve = spine_points - normals * semi_thickness
     
-    # --- MUSCLE LAYER GENERATION (Base + Proportional Scaling) ---
-    # We ensure every morphology has at least a 1-particle-thick base layer.
-    # This prevents 'dead' phenotypes and provides a smooth evolutionary gradient.
+    # --- MUSCLE LAYER GENERATION ---
+    # Proportional Muscle Logic:
+    # The muscle layer is a fixed percentage of the local wall thickness.
+    # If evolution wants stronger muscles, it must evolve thicker walls.
     
     spacing = 1.0 / (grid_res * 2.0)           # Physical particle spacing
-    min_base_muscle = spacing * 1.2            # Guaranteed minimum layer (approx 1.2x spacing)
-    muscle_ratio = 0.20                        # Proportional thickness (20% of wall)
+    min_base_muscle = spacing * 1.2            # Minimum physical thickness
+    muscle_ratio = 0.25                        # Muscle is 25% of the wall thickness
     
-    # Final muscle thickness: Base floor + percentage of local thickness
-    # Even at the thinnest tip (t_tip), this will result in a visible muscle layer.
+    # Final muscle thickness
     effective_muscle_thick = min_base_muscle + (semi_thickness * muscle_ratio)
     
-    # Ensure the muscle doesn't exceed the total thickness of the bell wall
+    # Cap muscle so it never consumes the entire wall (max 90% of half-thickness)
     effective_muscle_thick = np.minimum(effective_muscle_thick, semi_thickness * 0.9)
     
-    # Define the "Muscle Interface" (where Muscle meets Jelly)
-    # The muscle lines the interior (inner_curve) and extends into the body.
+    # Define the "Muscle Interface"
     muscle_interface = spine_points - normals * (semi_thickness - effective_muscle_thick)
     
     # 4. Define Polygons
@@ -151,8 +153,6 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
 def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
     """
     Creates a complete particle set with PHYSICALLY CORRECT spacing.
-    Args:
-        grid_res: The resolution of the physics grid. MUST match mpm_sim.py.
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
@@ -212,6 +212,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
 
 def random_genome():
     """Generate a random but reasonable genome for testing."""
+    # 9 Genes: Shape (6) + Thickness (3)
     genome = np.zeros(9)
     genome[0] = np.random.uniform(0.0, 0.15)   # cp1_x
     genome[1] = np.random.uniform(-0.05, 0.05) # cp1_y
