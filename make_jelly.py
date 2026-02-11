@@ -102,13 +102,15 @@ def generate_phenotype(genome, spawn_offset=None):
     else:
         return np.zeros((0, 2)), np.zeros(0, dtype=int)
 
-def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
+def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005, water_level=0.85):
     """
     Creates a complete particle set with PHYSICALLY CORRECT spacing.
-    
+
     Args:
-        grid_res: The resolution of the physics grid (e.g. 128). 
+        grid_res: The resolution of the physics grid (e.g. 128).
                   CRITICAL: This must match 'n_grid' in mpm_sim.py
+        water_level: Height of free surface (0.0-1.0). Default 0.85 leaves
+                     air gap above for jellyfish to rise without hitting ceiling.
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
@@ -117,20 +119,13 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     robot_pos, robot_mat = generate_phenotype(genome, spawn_offset)
     n_robot = len(robot_pos)
 
-    # 2. Generate Water Grid (CORRECTED)
-    # We ignore max_particles for a moment and generate the density required by physics.
-    # Physics requires 2 particles per grid cell (dx/2 spacing).
-    # dx = 1.0 / grid_res. Spacing = 1.0 / (grid_res * 2).
-    
+    # 2. Generate Water Grid
+    # Physics requires ~4 particles per grid cell (dx/2 spacing).
     spacing = 1.0 / (grid_res * 2.0)
-    
-    # Create ranges with a half-spacing buffer so we don't spawn ON the wall
+
     margin = spacing * 3
     wx = np.arange(margin, 1.0 - margin, spacing)
-    wy = np.arange(margin, 1.0 - margin, spacing) # Fill to top
-    
-    # You can lower the water level here if you want:
-    # wy = np.arange(margin, 0.6, spacing) 
+    wy = np.arange(margin, water_level, spacing)  # Free surface at water_level
 
     wgx, wgy = np.meshgrid(wx, wy)
     water_candidates = np.vstack([wgx.ravel(), wgy.ravel()]).T

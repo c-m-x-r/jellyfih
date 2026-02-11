@@ -56,31 +56,44 @@ def load_population_to_gpu(all_positions, all_materials):
 
 
 def run_simulation_streaming(output_path="population_sim.mp4"):
-    """Run physics simulation with per-frame GPU render streamed to video.
-
-    Renders each frame on GPU, transfers a single 12 MB frame to CPU,
-    and encodes immediately — no history buffer or video buffer needed.
-    """
-    # Warmup: let hydrostatic pressure equilibrate
+    """Run physics simulation with per-frame GPU render streamed to video."""
+    
+    # 1. Warmup
+    # We no longer track sim_time in Python; it is stored in sim.sim_time_field
     print(f"Warmup: {sim.warmup_steps} substeps...")
-    for _ in range(sim.warmup_steps):
-        sim.substep()
+    
+    # Reset GPU time field if accessible, or just rely on init
+    if hasattr(sim, 'sim_time_field'):
+        sim.sim_time_field[None] = 0.0
+
+    for step in range(sim.warmup_steps):
+        if step % 100 == 0:
+            sim.compute_jelly_centroid()
+        sim.substep()  # <--- FIXED: No arguments, typo removed
+    
     sim.ti.sync()
 
-    # Set up video writer
+    # 2. Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, 30.0, (sim.video_res, sim.video_res))
 
     print(f"Simulating + rendering (streaming) {sim.frames} frames...")
     start_time = time.time()
 
+    # 3. Main Loop
     for frame in range(sim.frames):
+        sim.compute_jelly_centroid()  # Once per frame
+        
+        # Ideally, this loop should be moved into mpm_sim.py as a kernel 
+        # (e.g., @ti.kernel def solve_steps(n): ...) for maximum speed.
+        # For now, we just call the no-arg kernel 50 times.
         for _ in range(sim.substeps_per_frame):
-            sim.substep()
-
+            sim.substep()  # <--- FIXED: No arguments passed
+            
         # Render on GPU, transfer single frame to CPU, encode
         sim.clear_frame_buffer()
         sim.render_frame(sim.res_sub, sim.grid_side, 1.5)
+        
         frame_np = sim.frame_buffer.to_numpy()
         frame_u8 = (np.clip(frame_np, 0.0, 1.0) * 255).astype(np.uint8)
         out.write(cv2.cvtColor(frame_u8, cv2.COLOR_RGB2BGR))

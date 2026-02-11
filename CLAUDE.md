@@ -135,3 +135,6 @@ Transition: Re-evaluate top 20% of population at high-res before continuing.
 3. Missing actuation logic
 4. Boundary conditions cause wake recirculation
 5. No Aurelia aurita baseline genome defined yet
+
+
+The current entry poin is run_population.py
