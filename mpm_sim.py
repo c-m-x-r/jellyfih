@@ -41,8 +41,8 @@ water_lambda = 4000.0
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
-actuation_freq = 1.0  # Hz
-actuation_strength = 2000.0 
+actuation_freq = 0.8  # Hz
+actuation_strength = 10000.0 
 
 # Rendering
 video_res = 1024
@@ -120,7 +120,7 @@ def substep():
             # CRITICAL FIX: Increase density 4x. 
             # This lowers sound speed c = sqrt(E/rho) to prevent CFL explosion
             # while keeping the payload heavy (inertial resistance).
-            current_mass *= 2.0 
+            current_mass *= 2.5
             
         elif material[m, p] == 0:  # Water
             mu, la = 0.0, water_lambda
@@ -151,7 +151,7 @@ def substep():
         
         # Active Muscle Stress
         if material[m, p] == 3:
-            contractile_pressure = -actuation_strength * activation
+            contractile_pressure = actuation_strength * activation
             stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
 
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
@@ -207,7 +207,10 @@ def substep():
                 new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             v[m, p], C[m, p] = new_v, new_C
 
-        v[m, p][1] -= dt * gravity
+        if material[m, p] != 2:
+            v[m, p][1] -= dt * gravity
+        else:
+            v[m, p][1] -= dt * gravity * 0.2
         x[m, p] += dt * v[m, p]
         
         for d in ti.static(range(2)):
