@@ -4,8 +4,8 @@ from matplotlib.path import Path
 from scipy.spatial import cKDTree
 
 # --- CONFIGURATION ---
-PAYLOAD_WIDTH = 0.1
-PAYLOAD_HEIGHT = 0.1   
+PAYLOAD_WIDTH = 0.08
+PAYLOAD_HEIGHT = 0.05 
 DEFAULT_SPAWN = np.array([0.5, 0.7]) 
 
 def cubic_bezier(p0, p1, p2, p3, t):
@@ -21,20 +21,19 @@ def get_normals_2d(points):
     norm = np.linalg.norm(normals, axis=1, keepdims=True)
     norm[norm == 0] = 1
     return normals / norm
-
 def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     """
     Converts a CMA-ES genome vector into particle positions and materials.
-    Includes a 'Mesoglea Collar' to improve force transfer to the payload.
+    Includes a 'Mesoglea Collar' and 'Transverse Bridge' to unify the body.
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
     
     # 1. Define Key Points
-    # The bell starts at the edge of the payload
+    # The bell starts at the bottom corner of the payload
     start_p = np.array([PAYLOAD_WIDTH / 2.0, 0.0]) 
     
-    # Genes 0-5: Shape Control
+    # Genes 0-5: Shape Control (Bezier Control Points)
     cp1 = start_p + np.array([abs(genome[0]), genome[1]])
     cp2 = start_p + np.array([abs(genome[2]), genome[3]])
     end_p = start_p + np.array([abs(genome[4]), genome[5]])
@@ -59,7 +58,7 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # --- MUSCLE LAYER GENERATION ---
     spacing = 1.0 / (grid_res * 2.0)
     min_base_muscle = spacing * 1.2
-    muscle_ratio = 0.25 
+    muscle_ratio = 0.25  # Muscle is 25% of wall thickness
     
     effective_muscle_thick = min_base_muscle + (semi_thickness * muscle_ratio)
     effective_muscle_thick = np.minimum(effective_muscle_thick, semi_thickness * 0.9)
@@ -72,87 +71,104 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # --- RASTERIZATION SETUP ---
     raster_res = grid_res * 2 
     
-    # Calculate bounding box for the entire robot (including potential collar)
-    min_x = min(np.min(body_polygon[:, 0]), -PAYLOAD_WIDTH) # Ensure we cover payload area
+    # Bounding box setup (Extra padding for collar/bridge)
+    min_x = min(np.min(body_polygon[:, 0]), -PAYLOAD_WIDTH) 
     max_x = max(np.max(body_polygon[:, 0]), PAYLOAD_WIDTH)
-    min_y = min(np.min(body_polygon[:, 1]), 0.0)
+    
+    # Extend Y range downwards for the bridge and upwards for payload
+    min_y = min(np.min(body_polygon[:, 1]), -0.05) 
     max_y = max(np.max(body_polygon[:, 1]), PAYLOAD_HEIGHT)
     
-    # Add padding for the collar
-    COLLAR_PADDING = 0.02
-    min_x -= COLLAR_PADDING
-    max_x += COLLAR_PADDING
-    
-    x_range = np.linspace(min_x, max_x, int((max_x-min_x)*raster_res))
-    y_range = np.linspace(min_y, max_y, int((max_y-min_y)*raster_res))
+    PAD = 0.05
+    x_range = np.linspace(min_x - PAD, max_x + PAD, int((max_x - min_x + 2*PAD)*raster_res))
+    y_range = np.linspace(min_y - PAD, max_y + PAD, int((max_y - min_y + 2*PAD)*raster_res))
     grid_x, grid_y = np.meshgrid(x_range, y_range)
     candidate_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
     
-    # 5. Generate ROBOT Parts
+    # 5. Define Structural Masks
     
     # A. The Bell (Morphology)
     path_body = Path(body_polygon)
     mask_bell = path_body.contains_points(candidate_points)
     
-    # B. The Muscle (Subset of Bell)
+    # B. The Muscle (Active Tissue)
     path_muscle = Path(muscle_polygon)
     mask_muscle = path_muscle.contains_points(candidate_points)
     
-    # C. The "Mesoglea Collar" (NEW FORCE TRANSFER HUB)
-    # Wraps the bottom 40% of the payload and extends slightly wider
-    collar_w = PAYLOAD_WIDTH + 0.03  # 1.5cm extra on each side
-    collar_h = PAYLOAD_HEIGHT * 0.40 
+    # C. The Collar (Socket around Payload)
+    # Wraps the bottom 40% of the payload sides
+    collar_w = PAYLOAD_WIDTH + 0.03
+    collar_h = PAYLOAD_HEIGHT * 0.40
     
-    # Define Collar Box
     mask_collar_box = (
-        (candidate_points[:, 0] >= 0) & # Right side only (mirroring handles left)
+        (candidate_points[:, 0] >= 0) & 
         (candidate_points[:, 0] <= collar_w/2.0) &
         (candidate_points[:, 1] >= 0) &
         (candidate_points[:, 1] <= collar_h)
     )
-    
-    # Define Payload Box (To subtract it)
-    mask_payload_space = (
+    # Exclude the actual payload space so we don't overlap rigid body
+    mask_payload_space_positive = (
         (candidate_points[:, 0] <= PAYLOAD_WIDTH/2.0) &
         (candidate_points[:, 1] <= PAYLOAD_HEIGHT)
     )
+    mask_collar = mask_collar_box & ~mask_payload_space_positive
     
-    # Collar = Box MINUS Payload Space (Hollow Socket)
-    # We include a tiny overlap (epsilon) to ensure fusion
-    mask_collar = mask_collar_box & ~mask_payload_space
+    # D. The Transverse Bridge (NEW)
+    # A plate of jelly UNDER the payload connecting left and right sides.
+    # Spans full width, centered at x=0.
+    # Y-range: -0.03 to 0.0 (Below payload)
+    bridge_thick = 0.03
+    mask_bridge = (
+        (candidate_points[:, 0] >= -collar_w/2.0) & # Connects to outer edge of collar
+        (candidate_points[:, 0] <= collar_w/2.0) &
+        (candidate_points[:, 1] >= -bridge_thick) &
+        (candidate_points[:, 1] <= 0.0)
+    )
     
-    # 6. Assemble Materials
-    # Initialize as 0 (Water/Nothing)
+    # 6. Assemble Soft Body Materials
     final_mats = np.zeros(len(candidate_points), dtype=int)
     
-    # Apply Collar (Material 1 - Jelly)
-    final_mats[mask_collar] = 1
+    # Order matters (later overwrites earlier):
+    final_mats[mask_bridge] = 1 # Bridge (Jelly)
+    final_mats[mask_collar] = 1 # Collar (Jelly)
+    final_mats[mask_bell] = 1   # Bell (Jelly)
+    final_mats[mask_bell & mask_muscle] = 3 # Muscle (Active)
     
-    # Apply Bell (Material 1 - Jelly) - Overwrites Collar if overlap (fine, same material)
-    final_mats[mask_bell] = 1
+    # Extract right-side particles (Bridge is centered, so we keep x>0 for mirror logic, 
+    # OR we handle bridge separately. Easier to let mirror handle x>0 and add bridge center explicitly)
     
-    # Apply Muscle (Material 3) - Overwrites Jelly
-    final_mats[mask_bell & mask_muscle] = 3
+    # Current candidates cover the whole area. 
+    # Let's split into Right-Side logic to match existing mirror workflow.
     
-    # Extract active particles
-    active_mask = final_mats > 0
-    right_points = candidate_points[active_mask]
-    right_mats = final_mats[active_mask]
+    # Filter for Right Side (x >= 0) OR Bridge (x covers 0)
+    # Actually, simpler approach: Just define the WHOLE soft body (Bridge + Right) 
+    # then mirror the Right parts.
     
-    # 7. Mirror to create Left Side
+    # Extract Right-Side Bell/Collar
+    mask_right_side = (candidate_points[:, 0] >= 0) & (final_mats > 0)
+    right_points = candidate_points[mask_right_side]
+    right_mats = final_mats[mask_right_side]
+    
+    # 7. Mirror to create Full Body
     if len(right_points) > 0:
         left_pos = right_points.copy()
         left_pos[:, 0] *= -1 
         left_mats = right_mats.copy()
         
+        # Combine
         all_soft_pos = np.vstack([right_points, left_pos])
         all_soft_mats = np.concatenate([right_mats, left_mats])
+        
+        # Add the Central Bridge Slice (strip near x=0 that might get missed by mirror gap)
+        # Or better: The Bridge mask above covers -W to W. 
+        # But we only extracted x>=0. Mirroring x>=0 covers x<=0. 
+        # This works perfectly.
     else:
         all_soft_pos = np.zeros((0, 2))
         all_soft_mats = np.zeros(0, dtype=int)
 
-    # 8. Generate Payload (Rigid Body - Material 2)
-    # We regenerate this explicitly to ensure high resolution fill
+    # 8. Generate Payload (Material 2)
+    # Explicitly generated to ensure it fits perfectly in the gap we left
     px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
     py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT*raster_res))
     pgx, pgy = np.meshgrid(px, py)

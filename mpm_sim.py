@@ -9,7 +9,7 @@ ti.init(arch=ti.cuda)  # CUDA required
 # Simulation Constants
 n_instances = 16
 quality = 1  # 1=low-res (128 grid), 2=high-res (256 grid)
-n_particles = 70000
+n_particles = 80000
 n_grid = 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 5e-5 / quality
@@ -41,7 +41,7 @@ water_lambda = 4000.0
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
-actuation_freq = 2.0  # Hz
+actuation_freq = 1.0  # Hz
 actuation_strength = 2000.0 
 
 # Rendering
@@ -174,7 +174,7 @@ def substep():
             
             # STABILIZATION: Global Damping
             # Bleeds off excess energy from numerical errors (1% drag)
-            grid_v[m, i, j] *= 0.99 
+            grid_v[m, i, j] *= 0.99998
             
             # Boundary Damping
             damp_cells = n_grid // 20

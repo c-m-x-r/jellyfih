@@ -9,7 +9,7 @@ import mpm_sim as sim
 # Defined here to control the experiment
 WARMUP_STEPS = 10
 FRAMES = 400
-SUBSTEPS = 50
+SUBSTEPS = 200
 
 def generate_population(n_instances, n_particles):
     """Generate a population of filled tanks, one per instance."""
