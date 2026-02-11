@@ -1,13 +1,12 @@
 import taichi as ti
-import time
 import numpy as np
-import cv2
 import math
 
+# --- ENGINE CONFIGURATION ---
 ti.set_logging_level(ti.ERROR)
-ti.init(arch=ti.cuda)  # CUDA required for high performance
+ti.init(arch=ti.cuda)  # CUDA required
 
-# --- SIMULATION SETTINGS ---
+# Simulation Constants
 n_instances = 16
 quality = 1  # 1=low-res (128 grid), 2=high-res (256 grid)
 n_particles = 70000
@@ -18,21 +17,22 @@ p_vol = (dx * 0.5) ** 2
 p_rho = 1
 p_mass = p_vol * p_rho
 
-# --- MATERIAL SETTINGS ---
+# Material Constants
 E_base = 0.1e4
 nu_base = 0.2
 mu_0_base = E_base / (2 * (1 + nu_base))
 lambda_0_base = E_base * nu_base / ((1 + nu_base) * (1 - 2 * nu_base))
 
-# Jelly/Muscle Elasticity
+# Jelly/Muscle Properties (Soft)
 E_jelly = 0.1e4  
 nu_jelly = 0.45 
 mu_jelly = E_jelly / (2 * (1 + nu_jelly))
 lambda_jelly = E_jelly * nu_jelly / ((1 + nu_jelly) * (1 - 2 * nu_jelly))
 
-# Payload Properties (Rigid)
-# We set this 200x stiffer than the jelly to resist deformation
-E_payload = 2.0e4 
+# Payload Properties (Heavy & Stiff)
+# Reduced E from 2e5 to 4e4 to satisfy CFL: c = sqrt(E/rho)
+# We will compensate by increasing density (rho) in the kernel
+E_payload = 4.0e4 
 nu_payload = 0.2
 mu_payload = E_payload / (2 * (1 + nu_payload))
 lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
@@ -40,24 +40,17 @@ lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payloa
 water_lambda = 4000.0
 gravity = 10.0
 
-# --- ACTUATION SETTINGS ---
-actuation_freq = 1.0   # Hz
-# High strength for Active Stress (Pressure)
-actuation_strength = 4000.0 
+# Actuation (Pulsed Active Stress)
+actuation_freq = 2.0  # Hz
+actuation_strength = 2000.0 
 
-# --- RECORDING SETTINGS ---
-frames = 100
-substeps_per_frame = 50
-warmup_steps = 200
-
-# --- RENDERING SETTINGS ---
-grid_side = int(math.ceil(math.sqrt(n_instances)))
+# Rendering
 video_res = 1024
+grid_side = int(math.ceil(math.sqrt(n_instances)))
 res_sub = video_res // grid_side
 
+# --- GPU MEMORY ALLOCATION ---
 print(f"Allocating {n_instances} instances with {n_particles} particles each...")
-
-# Fields
 x = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 C = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))
@@ -68,10 +61,20 @@ grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))
 grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid))
 
 sim_time = ti.field(dtype=float, shape=()) 
-
-# Render Buffer (HDR - can exceed 1.0)
 frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
+# --- PHYSICS KERNELS ---
+
+@ti.kernel
+def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
+    """Reset a specific instance with new particle data."""
+    for p in range(n_particles):
+        x[instance, p] = [pos_np[p, 0], pos_np[p, 1]]
+        material[instance, p] = mat_np[p]
+        v[instance, p] = [0.0, 0.0]
+        F[instance, p] = ti.Matrix.identity(float, 2)
+        C[instance, p] = ti.Matrix.zero(float, 2, 2)
+        Jp[instance, p] = 1.0
 
 @ti.kernel
 def substep():
@@ -81,7 +84,7 @@ def substep():
     period = 1.0 / actuation_freq
     phase = (current_time % period) / period
     
-    # Asymmetric Activation: Fast Attack (0.2), Slow Decay
+    # Asymmetric Activation
     activation = 0.0
     if phase < 0.2:
         activation = phase / 0.2
@@ -107,8 +110,18 @@ def substep():
 
         # Material Logic
         mu, la = mu_0_base, lambda_0_base
+        current_mass = p_mass  # Base mass
+
         if material[m, p] == 1 or material[m, p] == 3:  # Jelly or Muscle
             mu, la = mu_jelly * 0.3, lambda_jelly * 0.3
+        
+        elif material[m, p] == 2:  # Payload (Heavy Rigid Body)
+            mu, la = mu_payload, lambda_payload
+            # CRITICAL FIX: Increase density 4x. 
+            # This lowers sound speed c = sqrt(E/rho) to prevent CFL explosion
+            # while keeping the payload heavy (inertial resistance).
+            current_mass *= 2.0 
+            
         elif material[m, p] == 0:  # Water
             mu, la = 0.0, water_lambda
 
@@ -120,8 +133,9 @@ def substep():
         J = 1.0
         for d in ti.static(range(2)):
             new_sig = sig[d, d]
-            if material[m, p] == 2:  # Payload
-                new_sig = ti.min(ti.max(sig[d, d], 1 - 2.5e-2), 1 + 4.5e-3)
+            if material[m, p] == 2:  # Payload Plasticity
+                # Strict clamping prevents "spring winding" explosion
+                new_sig = ti.min(ti.max(sig[d, d], 1 - 5e-3), 1 + 5e-3)
             Jp[m, p] *= sig[d, d] / new_sig
             sig[d, d] = new_sig
             J *= new_sig
@@ -135,26 +149,32 @@ def substep():
         stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
                  ti.Matrix.identity(float, 2) * la * J * (J - 1)
         
-        # --- ACTIVE MUSCLE STRESS ---
+        # Active Muscle Stress
         if material[m, p] == 3:
-            # Contractile pressure (suction) causes bending
             contractile_pressure = -actuation_strength * activation
             stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
 
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
-        affine = stress + p_mass * C[m, p]
+        
+        # Affine momentum transfer (APIC)
+        # Uses current_mass to properly weight the heavy payload
+        affine = stress + current_mass * C[m, p]
         
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
             weight = w[i][0] * w[j][1]
-            grid_v[m, base + offset] += weight * (p_mass * v[m, p] + affine @ dpos)
-            grid_m[m, base + offset] += weight * p_mass
+            grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
+            grid_m[m, base + offset] += weight * current_mass
 
     # 3. Grid Operations
     for m, i, j in grid_m:
         if grid_m[m, i, j] > 0:
             grid_v[m, i, j] /= grid_m[m, i, j]
+            
+            # STABILIZATION: Global Damping
+            # Bleeds off excess energy from numerical errors (1% drag)
+            grid_v[m, i, j] *= 0.99 
             
             # Boundary Damping
             damp_cells = n_grid // 20
@@ -194,7 +214,9 @@ def substep():
             x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
 
     sim_time[None] += dt
-# --- RENDERING PIPELINE (BIOLUMINESCENCE) ---
+
+
+##Rendering Pipeline
 
 @ti.func
 def hsv2rgb(h: float, s: float, v: float) -> ti.types.vector(3, float):
