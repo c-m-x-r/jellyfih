@@ -61,21 +61,18 @@ Jp = ti.field(dtype=float, shape=(n_instances, n_particles))
 grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))
 grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid))
 
-sim_time = ti.field(dtype=float, shape=()) 
+sim_time = ti.field(dtype=float, shape=())
 frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
-# --- PHYSICS KERNELS ---
+# Fitness evaluation buffer: [sum_y, count, sum_x] per instance
+fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
 
-@ti.kernel
-def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
-    """Reset a specific instance with new particle data."""
-    for p in range(n_particles):
-        x[instance, p] = [pos_np[p, 0], pos_np[p, 1]]
-        material[instance, p] = mat_np[p]
-        v[instance, p] = [0.0, 0.0]
-        F[instance, p] = ti.Matrix.identity(float, 2)
-        C[instance, p] = ti.Matrix.zero(float, 2, 2)
-        Jp[instance, p] = 1.0
+# Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
+instance_hue = ti.field(dtype=float, shape=(n_instances,))
+for _i in range(n_instances):
+    instance_hue[_i] = 0.55
+
+# --- PHYSICS KERNELS ---
 
 @ti.kernel
 def substep():
@@ -300,21 +297,21 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         norm_x = float(col_idx) / grid_norm_factor
         norm_y = float(row_idx) / grid_norm_factor
 
-        if mat == 0: # WATER 
+        if mat == 0: # WATER
             if vel > 0.5:
-                color = ti.Vector([0.1, 0.2, 0.8]) 
+                color = ti.Vector([0.1, 0.2, 0.8])
                 intensity = 0.015 * (vel / 10.0)
-                
-        elif mat == 1: # JELLY 
-            hue = 0.55 + (norm_x * 0.1)
+
+        elif mat == 1: # JELLY
+            hue = instance_hue[m]
             sat = 0.4 + (norm_y * 0.4)
             base_col = hsv2rgb(hue, sat, 0.9)
             glow = ti.abs(stress) * 2.0 + 0.1
             color = base_col + ti.Vector([glow, glow, glow])
             intensity = 0.05 + (glow * 0.2)
-            
+
         elif mat == 3: # MUSCLE (Visually syncs with activation)
-            hue = 0.55 + (norm_x * 0.1)
+            hue = instance_hue[m]
             color = hsv2rgb(hue, 0.2, 1.0) + ti.Vector([activation, activation, activation])
             intensity = 0.4 + (activation * 0.4)
             
@@ -357,5 +354,69 @@ def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.n
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
 
-if __name__ == "__main__":
-    main()
+# --- FITNESS EVALUATION KERNELS ---
+
+@ti.kernel
+def clear_fitness_buffer():
+    """Clear fitness buffer. MUST be called before compute_payload_stats."""
+    for i, j in fitness_buffer:
+        fitness_buffer[i, j] = 0.0
+
+@ti.kernel
+def compute_payload_stats():
+    """Accumulate payload (Material 2) positions for CoM calculation."""
+    for i, p in x:
+        if material[i, p] == 2:
+            ti.atomic_add(fitness_buffer[i, 0], x[i, p][1])  # Sum Y
+            ti.atomic_add(fitness_buffer[i, 1], 1.0)          # Count
+            ti.atomic_add(fitness_buffer[i, 2], x[i, p][0])  # Sum X
+
+def get_payload_stats():
+    """Compute payload center of mass. Returns (n_instances, 3) array: [com_y, com_x, count]."""
+    clear_fitness_buffer()
+    compute_payload_stats()
+    ti.sync()
+    raw = fitness_buffer.to_numpy()
+    stats = np.zeros((n_instances, 3))
+    for i in range(n_instances):
+        count = raw[i, 1]
+        if count > 0:
+            stats[i, 0] = raw[i, 0] / count  # CoM Y
+            stats[i, 1] = raw[i, 2] / count  # CoM X
+            stats[i, 2] = count
+    return stats
+
+def run_batch_headless(steps):
+    """
+    Run simulation headlessly for all instances.
+    Returns (n_instances, 5): [init_y, init_x, final_y, final_x, valid]
+    """
+    sim_time[None] = 0.0
+
+    # Capture initial payload positions
+    initial = get_payload_stats()
+
+    # Run physics
+    for _ in range(steps):
+        substep()
+
+    # Capture final payload positions
+    final = get_payload_stats()
+
+    # Assemble results
+    results = np.zeros((n_instances, 5))
+    for i in range(n_instances):
+        if initial[i, 2] > 0 and final[i, 2] > 0:
+            results[i, 0] = initial[i, 0]  # init CoM Y
+            results[i, 1] = initial[i, 1]  # init CoM X
+            results[i, 2] = final[i, 0]    # final CoM Y
+            results[i, 3] = final[i, 1]    # final CoM X
+            # Check for boundary-stuck payload (ceiling/floor)
+            if final[i, 0] > 0.99 or final[i, 0] < 0.01:
+                results[i, 4] = 0.0  # Invalid: stuck at boundary
+            else:
+                results[i, 4] = 1.0  # Valid
+        else:
+            results[i, 4] = 0.0  # Invalid: payload lost
+    return results
+

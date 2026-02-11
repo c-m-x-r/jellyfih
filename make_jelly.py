@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05 
-DEFAULT_SPAWN = np.array([0.5, 0.7]) 
+DEFAULT_SPAWN = np.array([0.5, 0.4]) 
 
 def cubic_bezier(p0, p1, p2, p3, t):
     """Returns a point on the cubic Bezier curve at time t."""
@@ -244,11 +244,14 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         positions[n_robot:n_robot + n_water] = water_pos[:n_water]
         materials[n_robot:n_robot + n_water] = 0 
 
+    muscle_count = int(np.sum(materials[:n_robot] == 3))
+
     return positions, materials, {
         'n_robot': n_robot,
         'n_water': n_water,
         'n_total': n_robot + n_water,
-        'n_dead': max_particles - (n_robot + n_water)
+        'n_dead': max_particles - (n_robot + n_water),
+        'muscle_count': muscle_count,
     }
 
 def random_genome():
