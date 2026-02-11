@@ -24,8 +24,8 @@ mu_0_base = E_base / (2 * (1 + nu_base))
 lambda_0_base = E_base * nu_base / ((1 + nu_base) * (1 - 2 * nu_base))
 
 # Jelly/Muscle Properties (Soft)
-E_jelly = 0.1e4  
-nu_jelly = 0.45 
+E_jelly = 0.7e3  
+nu_jelly = 0.3 
 mu_jelly = E_jelly / (2 * (1 + nu_jelly))
 lambda_jelly = E_jelly * nu_jelly / ((1 + nu_jelly) * (1 - 2 * nu_jelly))
 
@@ -82,13 +82,12 @@ def substep():
     period = 1.0 / actuation_freq
     phase = (current_time % period) / period
     
+    # Raised cosine waveform: 20% contraction, 80% relaxation (bio-inspired asymmetry)
     activation = 0.0
     if phase < 0.2:
-        activation = phase / 0.2        # Ramp up fast (0.1s)
-    elif phase > 0.2:
-        activation = 1 / (80 * (phase - 0.19)) # Ramp down fast
-    else:
-        activation = 0.0
+        activation = 0.5 * (1.0 - ti.cos(phase / 0.2 * 3.14159265))
+    elif phase < 1.0:
+        activation = 0.5 * (1.0 + ti.cos((phase - 0.2) / 0.8 * 3.14159265))
 
 
     # 1. Reset Grid
@@ -174,7 +173,7 @@ def substep():
             
             # STABILIZATION: Global Damping
             # Bleeds off excess energy from numerical errors (1% drag)
-            grid_v[m, i, j] *= 0.99998
+            #grid_v[m, i, j] *= 0.99998
             
             # Boundary Damping
             damp_cells = n_grid // 20
@@ -210,7 +209,7 @@ def substep():
         if material[m, p] != 2:
             v[m, p][1] -= dt * gravity
         else:
-            v[m, p][1] -= dt * gravity * 0.2
+            v[m, p][1] -= dt * gravity * 0.44
         x[m, p] += dt * v[m, p]
         
         for d in ti.static(range(2)):
@@ -275,9 +274,9 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     phase = (sim_time[None] % period) / period
     activation = 0.0
     if phase < 0.2:
-        activation = phase / 0.2
-    else:
-        activation = ti.max(0.0, 1.0 - ((phase - 0.2) / 0.8))
+        activation = 0.5 * (1.0 - ti.cos(phase / 0.2 * 3.14159265))
+    elif phase < 1.0:
+        activation = 0.5 * (1.0 + ti.cos((phase - 0.2) / 0.8 * 3.14159265))
     
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 
@@ -412,7 +411,7 @@ def run_batch_headless(steps):
             results[i, 2] = final[i, 0]    # final CoM Y
             results[i, 3] = final[i, 1]    # final CoM X
             # Check for boundary-stuck payload (ceiling/floor)
-            if final[i, 0] > 0.99 or final[i, 0] < 0.01:
+            if final[i, 0] > 0.93 or final[i, 0] < 0.01:
                 results[i, 4] = 0.0  # Invalid: stuck at boundary
             else:
                 results[i, 4] = 1.0  # Valid

@@ -2,20 +2,17 @@
 Evolutionary optimization of jellyfish morphologies using CMA-ES.
 
 Evaluates 16 morphologies in parallel on GPU via MPM simulation.
-Fitness: vertical payload displacement / metabolic cost, with stability penalty.
+Fitness: staying power — payload altitude maintenance against negative buoyancy.
+
+The payload is slightly negatively buoyant (2.5x density, 0.44x gravity = 1.1x
+effective weight). Without active swimming, the payload sinks. Fitness rewards
+morphologies that maintain the highest payload altitude with lateral stability.
 
 Usage:
     uv run python evolve.py                  # Full 50-generation run
     uv run python evolve.py --gens 5         # Quick 5-generation test
     uv run python evolve.py --view           # Render best genomes as video
     uv run python evolve.py --view --gen 3   # Render best from generation 3
-
-Note on fitness metric: CLAUDE.md specifies Cost of Transport (Energy / mass / distance).
-Full energy tracking requires per-step accumulation inside the GPU kernel, which is
-deferred. Current proxy: displacement * stability / normalized_muscle_mass. This
-correlates with CoT (more muscle = more energy, less displacement = worse) but is
-not identical. A zero-actuation baseline is run at generation 0 to validate that
-passive morphologies don't score well.
 """
 
 import argparse
@@ -29,7 +26,7 @@ import pickle
 
 import taichi as ti
 import mpm_sim as sim
-from make_jelly import fill_tank, random_genome
+from make_jelly import fill_tank, random_genome, AURELIA_GENOME
 
 # --- CONFIGURATION ---
 GENERATIONS = 50
@@ -39,13 +36,12 @@ START_SIGMA = 0.1
 OUTPUT_DIR = "output"
 
 # Genome bounds: [cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, t_base, t_mid, t_tip]
-GENOME_LOWER = [0.0, -0.1,  0.0,  -0.15, 0.05, -0.4,  0.01,  0.01,  0.003]
-GENOME_UPPER = [0.2,  0.1,  0.25,  0.1,  0.3,  -0.05, 0.08,  0.1,   0.03]
+GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05, -0.45,  0.025,  0.025,  0.01]
+GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35, -0.03,  0.08,   0.1,    0.04]
 GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 
 # Fitness constants
 PENALTY_INVALID = 100.0
-DISPLACEMENT_FLOOR = 0.005  # Minimum displacement to count as "moving"
 
 # View mode constants
 VIEW_STEPS = 60000       # Sim steps for rendered view
@@ -55,7 +51,11 @@ VIEW_FPS = 30
 
 def compute_fitness(sim_results, muscle_counts):
     """
-    Compute fitness for all instances from simulation results.
+    Compute staying-power fitness for all instances.
+
+    Payload is slightly negatively buoyant and sinks without active swimming.
+    Fitness = final payload altitude * lateral stability.
+    No cost ratio — the physics provides implicit cost (more mass = more drag).
 
     sim_results: (n_instances, 5) from run_batch_headless
         [init_y, init_x, final_y, final_x, valid]
@@ -66,34 +66,22 @@ def compute_fitness(sim_results, muscle_counts):
     scores = []
 
     for i in range(POPSIZE):
-        init_y = sim_results[i, 0]
         init_x = sim_results[i, 1]
         final_y = sim_results[i, 2]
         final_x = sim_results[i, 3]
         valid = sim_results[i, 4]
-        muscle = muscle_counts[i]
 
         # Invalid instance: payload lost or stuck at boundary
         if valid == 0:
             scores.append(PENALTY_INVALID)
             continue
 
-        # Vertical displacement (positive = upward)
-        displacement = final_y - init_y
+        # Lateral stability: stronger penalty (coeff 50) for drift from initial x
+        drift = abs(final_x - init_x)
+        stability = 1.0 / (1.0 + 50.0 * drift ** 2)
 
-        # Smooth quadratic stability penalty based on lateral drift
-        drift = abs(final_x - 0.5)
-        stability = 1.0 / (1.0 + 10.0 * drift ** 2)
-
-        # Metabolic cost: normalized muscle mass (avoid div-by-zero)
-        cost = (muscle / 500.0) + 0.1
-
-        # Fitness: reward upward displacement, penalize drift and muscle cost
-        if displacement < DISPLACEMENT_FLOOR:
-            # Penalize non-movers or sinkers proportional to how badly they failed
-            fitness = displacement - 0.01
-        else:
-            fitness = (displacement * stability) / cost
+        # Staying power: higher final altitude = better
+        fitness = final_y * stability
 
         # CMA-ES minimizes, so negate
         scores.append(-fitness)
@@ -311,7 +299,7 @@ def evolve(generations):
     csv_writer = csv.writer(csv_file)
     if not csv_exists:
         header = ['generation', 'individual'] + [f'gene_{i}' for i in range(9)] + \
-                 ['fitness', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma']
+                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma']
         csv_writer.writerow(header)
         csv_file.flush()
 
@@ -356,10 +344,11 @@ def evolve(generations):
         # Per-individual CSV logging
         for ind in range(POPSIZE):
             disp = sim_results[ind, 2] - sim_results[ind, 0]
-            drift = abs(sim_results[ind, 3] - 0.5)
+            drift = abs(sim_results[ind, 3] - sim_results[ind, 1])
             valid = sim_results[ind, 4]
+            final_y = sim_results[ind, 2]
             row = [gen, ind] + list(genomes[ind]) + [
-                -fitness_values[ind], disp, drift,
+                -fitness_values[ind], final_y, disp, drift,
                 muscle_counts[ind], int(valid), es.sigma
             ]
             csv_writer.writerow(row)
@@ -377,7 +366,9 @@ def evolve(generations):
             json.dump(history, f, indent=2)
 
         # Console output
+        best_alt = sim_results[best_idx, 2]
         print(f"Gen {gen:3d} | Best: {best_fitness:+.4f} | "
+              f"Alt: {best_alt:.4f} | "
               f"Disp: {best_disp:+.4f} | "
               f"Sigma: {es.sigma:.4f} | "
               f"Invalid: {n_invalid}/{POPSIZE} | "
@@ -404,6 +395,71 @@ def evolve(generations):
     print(f"Results saved to {OUTPUT_DIR}/")
 
 
+def eval_aurelia():
+    """
+    Evaluate the Aurelia aurita reference genome and render a video.
+    Runs the same simulation as evolution but with the hand-designed
+    moon jelly morphology, reporting its fitness as a baseline.
+    """
+    import imageio.v3 as iio
+
+    print("Evaluating Aurelia aurita (moon jelly) reference genome...")
+    print(f"  Genome: {AURELIA_GENOME.tolist()}")
+
+    # Fill all 16 instances with the same Aurelia genome
+    genomes = [AURELIA_GENOME] * POPSIZE
+    muscle_counts, batch_stats = load_batch(genomes)
+
+    print(f"  Muscle count: {muscle_counts[0]}")
+    print(f"  Robot particles: {batch_stats[0]['n_robot']}")
+
+    # Run headless evaluation
+    print(f"  Running {STEPS_PER_EVAL} simulation steps...")
+    sim_results = sim.run_batch_headless(STEPS_PER_EVAL)
+
+    # Compute fitness
+    fitness_values = compute_fitness(sim_results, muscle_counts)
+    best_fitness = -fitness_values[0]
+    displacement = sim_results[0, 2] - sim_results[0, 0]
+    drift = abs(sim_results[0, 3] - sim_results[0, 1])
+
+    print(f"\n  Results:")
+    print(f"    Fitness (staying power): {best_fitness:.4f}")
+    print(f"    Final altitude:          {sim_results[0, 2]:.4f}")
+    print(f"    Displacement:            {displacement:+.4f}")
+    print(f"    Lateral drift:           {drift:.4f}")
+    print(f"    Valid:                    {sim_results[0, 4]}")
+
+    # Render video with all 16 showing the same Aurelia
+    col_hues = [0.22, 0.33, 0.44, 0.50]
+    for m in range(POPSIZE):
+        col = m % sim.grid_side
+        sim.instance_hue[m] = col_hues[col]
+
+    # Reload and re-simulate with rendering
+    load_batch(genomes)
+    video_path = os.path.join(OUTPUT_DIR, "view_aurelia.mp4")
+    total_frames = VIEW_STEPS // VIEW_RENDER_EVERY
+    radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)
+
+    print(f"\n  Rendering {total_frames} frames to {video_path}...")
+    sim.sim_time[None] = 0.0
+    frames = []
+
+    for step in range(VIEW_STEPS):
+        sim.substep()
+        if step % VIEW_RENDER_EVERY == 0:
+            sim.clear_frame_buffer()
+            sim.render_frame_abyss(sim.res_sub, sim.grid_side, radius)
+            sim.tone_map_and_encode()
+            ti.sync()
+            img = sim.frame_buffer.to_numpy()
+            frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+
+    iio.imwrite(video_path, frames, fps=VIEW_FPS)
+    print(f"  Done! Video saved to {video_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Jellyfish evolutionary optimizer")
     parser.add_argument('--gens', type=int, default=GENERATIONS,
@@ -412,11 +468,15 @@ def main():
                         help="Render best genomes as video instead of evolving")
     parser.add_argument('--gen', type=int, default=None,
                         help="Specific generation to view (use with --view)")
+    parser.add_argument('--aurelia', action='store_true',
+                        help="Evaluate Aurelia aurita reference genome and render video")
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    if args.view:
+    if args.aurelia:
+        eval_aurelia()
+    elif args.view:
         view_best(gen_idx=args.gen)
     else:
         evolve(args.gens)
