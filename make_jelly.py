@@ -5,8 +5,23 @@ from scipy.spatial import cKDTree
 
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
-PAYLOAD_HEIGHT = 0.05 
-DEFAULT_SPAWN = np.array([0.5, 0.4]) 
+PAYLOAD_HEIGHT = 0.05
+DEFAULT_SPAWN = np.array([0.5, 0.7])
+
+# Aurelia aurita (moon jelly) reference genome:
+# Wide, shallow bell with moderate thickness — biomimetic baseline.
+# Approximates the saucer-shaped medusa with thin margin.
+AURELIA_GENOME = np.array([
+    0.05,   # cp1_x: gentle outward curve near payload
+    0.04,   # cp1_y: slight upward bulge (dome apex)
+    0.18,   # cp2_x: wide mid-bell
+    -0.03,  # cp2_y: gentle downward sweep
+    0.22,   # end_x: wide bell margin
+    -0.12,  # end_y: shallow depth (saucer shape, not deep cone)
+    0.04,   # t_base: moderate base thickness
+    0.05,   # t_mid: thick mesoglea mid-bell
+    0.015,  # t_tip: thin bell margin
+]) 
 
 def cubic_bezier(p0, p1, p2, p3, t):
     """Returns a point on the cubic Bezier curve at time t."""
@@ -257,14 +272,46 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
 def random_genome():
     """Generate a random but reasonable genome for testing."""
     # 9 Genes: Shape (6) + Thickness (3)
+    # Bounds match GENOME_LOWER/GENOME_UPPER in evolve.py
     genome = np.zeros(9)
-    genome[0] = np.random.uniform(0.0, 0.15)   # cp1_x
-    genome[1] = np.random.uniform(-0.05, 0.05) # cp1_y
-    genome[2] = np.random.uniform(0.05, 0.2)   # cp2_x
-    genome[3] = np.random.uniform(-0.1, 0.05)  # cp2_y
-    genome[4] = np.random.uniform(0.1, 0.25)   # end_x
-    genome[5] = np.random.uniform(-0.3, -0.1)  # end_y
-    genome[6] = np.random.uniform(0.02, 0.06)  # t_base
-    genome[7] = np.random.uniform(0.02, 0.08)  # t_mid
-    genome[8] = np.random.uniform(0.005, 0.02) # t_tip
+    genome[0] = np.random.uniform(0.0, 0.25)    # cp1_x
+    genome[1] = np.random.uniform(-0.15, 0.15)  # cp1_y
+    genome[2] = np.random.uniform(0.0, 0.3)     # cp2_x
+    genome[3] = np.random.uniform(-0.2, 0.15)   # cp2_y
+    genome[4] = np.random.uniform(0.05, 0.35)   # end_x
+    genome[5] = np.random.uniform(-0.45, -0.03) # end_y
+    genome[6] = np.random.uniform(0.025, 0.08)  # t_base
+    genome[7] = np.random.uniform(0.025, 0.1)   # t_mid
+    genome[8] = np.random.uniform(0.01, 0.04)   # t_tip
     return genome
+
+
+if __name__ == "__main__":
+    import sys
+
+    # Show Aurelia genome if --aurelia flag, otherwise random
+    if "--aurelia" in sys.argv:
+        genome = AURELIA_GENOME
+        title = "Aurelia aurita (Moon Jelly) Reference"
+    else:
+        genome = random_genome()
+        title = "Random Genome"
+
+    pos, mat = generate_phenotype(genome)
+    print(f"{title}: {genome}")
+    print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
+
+    colors = {0: '#4488cc', 1: '#44cc88', 2: '#ff6633', 3: '#ffcc00'}
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    for m_id, label in [(1, 'Jelly'), (3, 'Muscle'), (2, 'Payload')]:
+        mask = mat == m_id
+        if np.any(mask):
+            ax.scatter(pos[mask, 0], pos[mask, 1], c=colors[m_id],
+                       s=1, label=label, alpha=0.8)
+    ax.set_aspect('equal')
+    ax.set_title(title)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig("output/morphology_preview.png", dpi=150)
+    print("Saved to output/morphology_preview.png")
+    plt.show()
