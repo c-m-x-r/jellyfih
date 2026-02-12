@@ -1,0 +1,355 @@
+/* Reset & Base */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    /* Colors: Minimalist palette */
+    --bg: #FAFAFA;
+    --fg: #1A1A1A;
+    --border: #E0E0E0;
+    --accent: #4ECDC4;
+    --muted: #757575;
+    --highlight: #FF6B6B;
+
+    /* Spacing */
+    --space-xs: 0.5rem;
+    --space-sm: 1rem;
+    --space-md: 1.5rem;
+    --space-lg: 2rem;
+    --space-xl: 3rem;
+
+    /* Typography */
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --font-mono: 'SF Mono', 'Monaco', 'Inconsolata', 'Courier New', monospace;
+}
+
+body {
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--fg);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Container */
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: var(--space-lg);
+}
+
+/* Header */
+header {
+    margin-bottom: var(--space-xl);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: var(--space-md);
+}
+
+header h1 {
+    font-size: 2.5rem;
+    font-weight: 300;
+    letter-spacing: 0.1em;
+    color: var(--fg);
+}
+
+header p {
+    font-size: 0.875rem;
+    color: var(--muted);
+    margin-top: var(--space-xs);
+}
+
+/* Grid Layout */
+.grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-lg);
+}
+
+@media (min-width: 768px) {
+    .grid {
+        grid-template-columns: 1fr 2fr;
+        grid-template-rows: auto auto;
+    }
+
+    .controls {
+        grid-column: 1;
+        grid-row: 1 / 3;
+    }
+
+    .viewer {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .stats {
+        grid-column: 2;
+        grid-row: 2;
+    }
+}
+
+@media (min-width: 1200px) {
+    .grid {
+        grid-template-columns: 1fr 2fr 1fr;
+        grid-template-rows: 1fr;
+    }
+
+    .controls {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .viewer {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .stats {
+        grid-column: 3;
+        grid-row: 1;
+    }
+}
+
+/* Panel */
+.panel {
+    background: white;
+    border: 1px solid var(--border);
+    padding: var(--space-lg);
+}
+
+.panel h2 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: var(--space-md);
+}
+
+/* Actions */
+.actions {
+    display: flex;
+    gap: var(--space-xs);
+    margin-bottom: var(--space-md);
+}
+
+/* Buttons */
+.btn, .btn-secondary {
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--border);
+    background: white;
+    color: var(--fg);
+    font-size: 0.875rem;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn:hover {
+    background: var(--fg);
+    color: white;
+    border-color: var(--fg);
+}
+
+.btn-secondary:hover {
+    background: var(--bg);
+}
+
+.btn:active, .btn-secondary:active {
+    transform: translateY(1px);
+}
+
+/* Gene Controls */
+.gene-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+}
+
+.gene-control {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.gene-control label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.gene-control .value {
+    font-family: var(--font-mono);
+    color: var(--fg);
+    font-size: 0.875rem;
+    min-width: 4rem;
+    text-align: right;
+}
+
+.gene-control input[type="range"] {
+    width: 100%;
+    height: 2px;
+    background: var(--border);
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.gene-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--fg);
+    cursor: pointer;
+    border-radius: 50%;
+}
+
+.gene-control input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    background: var(--fg);
+    cursor: pointer;
+    border-radius: 50%;
+    border: none;
+}
+
+.gene-control input[type="range"]:focus::-webkit-slider-thumb {
+    background: var(--accent);
+}
+
+.gene-control input[type="range"]:focus::-moz-range-thumb {
+    background: var(--accent);
+}
+
+/* Genome I/O */
+.genome-io {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-md);
+}
+
+.genome-io label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    margin-bottom: var(--space-sm);
+}
+
+.genome-io label span {
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.genome-io textarea {
+    width: 100%;
+    padding: var(--space-sm);
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    resize: vertical;
+    background: var(--bg);
+}
+
+.genome-io textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* Viewer */
+.canvas-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3/4;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+#morphology-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+#morphology-img.loaded {
+    opacity: 1;
+}
+
+.loading {
+    position: absolute;
+    font-size: 0.875rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+}
+
+.loading.hidden {
+    display: none;
+}
+
+/* Stats */
+.stats dl {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--space-sm) var(--space-md);
+}
+
+.stats dt {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.stats dd {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    color: var(--fg);
+    text-align: right;
+}
+
+/* Footer */
+footer {
+    margin-top: var(--space-xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--border);
+    text-align: center;
+}
+
+footer p {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+/* Mobile Optimizations */
+@media (max-width: 767px) {
+    .container {
+        padding: var(--space-sm);
+    }
+
+    header h1 {
+        font-size: 1.75rem;
+    }
+
+    .panel {
+        padding: var(--space-md);
+    }
+
+    .actions {
+        flex-wrap: wrap;
+    }
+}
