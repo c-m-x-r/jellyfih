@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jellyfih Genome Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>JELLYFIH</h1>
+            <p>Soft robotic jellyfish morphology explorer</p>
+        </header>
+
+        <!-- Main Grid -->
+        <main class="grid">
+            <!-- Controls Panel -->
+            <section class="panel controls">
+                <h2>Genome</h2>
+
+                <div class="actions">
+                    <button id="btn-default" class="btn">Default</button>
+                    <button id="btn-aurelia" class="btn">Aurelia</button>
+                    <button id="btn-random" class="btn">Random</button>
+                </div>
+
+                <div class="gene-controls" id="gene-controls">
+                    <!-- Sliders will be dynamically inserted here -->
+                </div>
+
+                <div class="genome-io">
+                    <label>
+                        <span>Import/Export</span>
+                        <textarea id="genome-json" rows="3" placeholder="[0.125, 0.0, ...]"></textarea>
+                    </label>
+                    <div class="actions">
+                        <button id="btn-load" class="btn-secondary">Load</button>
+                        <button id="btn-copy" class="btn-secondary">Copy</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Viewer Panel -->
+            <section class="panel viewer">
+                <div class="canvas-container">
+                    <div id="loading" class="loading">Rendering...</div>
+                    <img id="morphology-img" src="" alt="Jellyfish morphology">
+                </div>
+            </section>
+
+            <!-- Stats Panel -->
+            <section class="panel stats">
+                <h2>Statistics</h2>
+                <dl id="stats-list">
+                    <dt>Total Particles</dt>
+                    <dd id="stat-total">—</dd>
+
+                    <dt>Robot Particles</dt>
+                    <dd id="stat-robot">—</dd>
+
+                    <dt>Jelly</dt>
+                    <dd id="stat-jelly">—</dd>
+
+                    <dt>Muscle</dt>
+                    <dd id="stat-muscle">—</dd>
+
+                    <dt>Water</dt>
+                    <dd id="stat-water">—</dd>
+                </dl>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer>
+            <p>CMA-ES evolutionary optimization · Material Point Method simulation</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
