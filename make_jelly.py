@@ -23,6 +23,36 @@ AURELIA_GENOME = np.array([
     0.015,  # t_tip: thin bell margin
 ]) 
 
+def _segments_intersect(a, b, c, d):
+    """Check if line segment AB intersects segment CD using cross products."""
+    def cross2d(u, v):
+        return u[0] * v[1] - u[1] * v[0]
+    r = b - a
+    s = d - c
+    rxs = cross2d(r, s)
+    if abs(rxs) < 1e-12:
+        return False  # Parallel or collinear
+    qp = c - a
+    t = cross2d(qp, s) / rxs
+    u = cross2d(qp, r) / rxs
+    return 0 < t < 1 and 0 < u < 1
+
+
+def _polygon_self_intersects(polygon):
+    """Check if a closed polygon has any non-adjacent edge self-intersections."""
+    n = len(polygon)
+    for i in range(n):
+        a, b = polygon[i], polygon[(i + 1) % n]
+        # Check against non-adjacent edges (skip neighbors)
+        for j in range(i + 2, n):
+            if j == n - 1 and i == 0:
+                continue  # Last edge is adjacent to first
+            c, d = polygon[j], polygon[(j + 1) % n]
+            if _segments_intersect(a, b, c, d):
+                return True
+    return False
+
+
 def cubic_bezier(p0, p1, p2, p3, t):
     """Returns a point on the cubic Bezier curve at time t."""
     return (1-t)**3 * p0 + 3*(1-t)**2 * t * p1 + 3*(1-t) * t**2 * p2 + t**3 * p3
@@ -73,7 +103,7 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # --- MUSCLE LAYER GENERATION ---
     spacing = 1.0 / (grid_res * 2.0)
     min_base_muscle = spacing * 1.2
-    muscle_ratio = 0.25  # Muscle is 25% of wall thickness
+    muscle_ratio = 0.2  # Muscle is 25% of wall thickness
     
     effective_muscle_thick = min_base_muscle + (semi_thickness * muscle_ratio)
     effective_muscle_thick = np.minimum(effective_muscle_thick, semi_thickness * 0.9)
@@ -82,7 +112,11 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # 4. Define Polygons
     body_polygon = np.vstack([outer_curve, inner_curve[::-1]])
     muscle_polygon = np.vstack([muscle_interface, inner_curve[::-1]])
-    
+
+    # Check for self-intersecting morphologies
+    self_intersecting = (_polygon_self_intersects(body_polygon) or
+                         _polygon_self_intersects(muscle_polygon))
+
     # --- RASTERIZATION SETUP ---
     raster_res = grid_res * 2 
     
@@ -110,44 +144,88 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     path_muscle = Path(muscle_polygon)
     mask_muscle = path_muscle.contains_points(candidate_points)
     
-    # C. The Collar (Socket around Payload)
-    # Wraps the bottom 40% of the payload sides
-    collar_w = PAYLOAD_WIDTH + 0.03
-    collar_h = PAYLOAD_HEIGHT * 0.40
-    
-    mask_collar_box = (
-        (candidate_points[:, 0] >= 0) & 
-        (candidate_points[:, 0] <= collar_w/2.0) &
-        (candidate_points[:, 1] >= 0) &
-        (candidate_points[:, 1] <= collar_h)
-    )
-    # Exclude the actual payload space so we don't overlap rigid body
+    # Payload space mask (excludes collar/muscle from overlapping rigid payload)
     mask_payload_space_positive = (
         (candidate_points[:, 0] <= PAYLOAD_WIDTH/2.0) &
         (candidate_points[:, 1] <= PAYLOAD_HEIGHT)
     )
-    mask_collar = mask_collar_box & ~mask_payload_space_positive
-    
-    # D. The Transverse Bridge (NEW)
-    # A plate of jelly UNDER the payload connecting left and right sides.
-    # Spans full width, centered at x=0.
-    # Y-range: -0.03 to 0.0 (Below payload)
+
+    # C. The Collar (Smooth socket around Payload)
+    # Curved shape whose outer edge blends into the bell via cubic Bezier
+    collar_top_y = PAYLOAD_HEIGHT * 0.50
+    collar_thickness_top = t_base * 0.35
+    n_collar_pts = 20
+    collar_t_vals = np.linspace(0, 1, n_collar_pts)
+
+    # Inner edge: straight along payload side
+    collar_inner_edge = np.column_stack([
+        np.full(n_collar_pts, PAYLOAD_WIDTH / 2.0),
+        np.linspace(collar_top_y, 0, n_collar_pts)
+    ])
+
+    # Outer edge: cubic Bezier from collar top to bell outer surface
+    bell_outer_start = outer_curve[0]
+
+    if bell_outer_start[0] > PAYLOAD_WIDTH / 2.0:
+        # P0: collar top (thin wrap around payload)
+        P0 = np.array([PAYLOAD_WIDTH / 2.0 + collar_thickness_top, collar_top_y])
+        # P3: seamless junction with bell outer curve
+        P3 = bell_outer_start
+        # P1: vertical tangent at top (organic wrap feel)
+        P1 = np.array([P0[0], P0[1] - collar_top_y * 0.5])
+        # P2: approach bell along its tangent direction (C1 continuity)
+        bell_tangent = outer_curve[min(2, len(outer_curve)-1)] - outer_curve[0]
+        bt_len = np.linalg.norm(bell_tangent)
+        if bt_len > 1e-10:
+            P2 = P3 - (bell_tangent / bt_len) * (collar_top_y * 0.6)
+        else:
+            P2 = P3 + np.array([0, 0.01])
+
+        collar_outer_edge = np.array([
+            cubic_bezier(P0, P1, P2, P3, t) for t in collar_t_vals
+        ])
+
+        collar_polygon = np.vstack([collar_outer_edge, collar_inner_edge[::-1]])
+
+        # Collar muscle layer (inner 25%, continues subumbrellar muscle from bell)
+        collar_muscle_edge = collar_inner_edge + muscle_ratio * (collar_outer_edge - collar_inner_edge)
+        collar_muscle_polygon = np.vstack([collar_muscle_edge, collar_inner_edge[::-1]])
+
+        path_collar = Path(collar_polygon)
+        mask_collar = path_collar.contains_points(candidate_points)
+        mask_collar = mask_collar & ~mask_payload_space_positive
+
+        path_collar_muscle = Path(collar_muscle_polygon)
+        mask_collar_muscle = path_collar_muscle.contains_points(candidate_points)
+        mask_collar_muscle = mask_collar_muscle & ~mask_payload_space_positive
+
+        # Bridge width matches collar/bell junction
+        bridge_half_w = max(bell_outer_start[0], PAYLOAD_WIDTH/2.0 + collar_thickness_top)
+    else:
+        # Degenerate: bell folds inside payload, skip collar
+        mask_collar = np.zeros(len(candidate_points), dtype=bool)
+        mask_collar_muscle = np.zeros(len(candidate_points), dtype=bool)
+        bridge_half_w = PAYLOAD_WIDTH / 2.0 + 0.015
+
+    # D. The Transverse Bridge
+    # Plate of jelly under payload connecting left and right sides
     bridge_thick = 0.03
     mask_bridge = (
-        (candidate_points[:, 0] >= -collar_w/2.0) & # Connects to outer edge of collar
-        (candidate_points[:, 0] <= collar_w/2.0) &
+        (candidate_points[:, 0] >= -bridge_half_w) &
+        (candidate_points[:, 0] <= bridge_half_w) &
         (candidate_points[:, 1] >= -bridge_thick) &
         (candidate_points[:, 1] <= 0.0)
     )
-    
+
     # 6. Assemble Soft Body Materials
     final_mats = np.zeros(len(candidate_points), dtype=int)
-    
+
     # Order matters (later overwrites earlier):
-    final_mats[mask_bridge] = 1 # Bridge (Jelly)
-    final_mats[mask_collar] = 1 # Collar (Jelly)
-    final_mats[mask_bell] = 1   # Bell (Jelly)
-    final_mats[mask_bell & mask_muscle] = 3 # Muscle (Active)
+    final_mats[mask_bridge] = 1                     # Bridge (Jelly)
+    final_mats[mask_collar] = 1                     # Collar (Jelly)
+    final_mats[mask_collar_muscle] = 3              # Collar Muscle
+    final_mats[mask_bell] = 1                       # Bell (Jelly)
+    final_mats[mask_bell & mask_muscle] = 3         # Bell Muscle
     
     # Extract right-side particles (Bridge is centered, so we keep x>0 for mirror logic, 
     # OR we handle bridge separately. Easier to let mirror handle x>0 and add bridge center explicitly)
@@ -204,9 +282,9 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
         final_mat.append(np.ones(len(payload_particles), dtype=int) * 2)
 
     if len(final_pos) > 0:
-        return np.vstack(final_pos), np.concatenate(final_mat).astype(int)
+        return np.vstack(final_pos), np.concatenate(final_mat).astype(int), self_intersecting
     else:
-        return np.zeros((0, 2)), np.zeros(0, dtype=int)
+        return np.zeros((0, 2)), np.zeros(0, dtype=int), True
 
 def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
     """
@@ -216,7 +294,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         spawn_offset = DEFAULT_SPAWN
 
     # 1. Generate robot particles
-    robot_pos, robot_mat = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
+    robot_pos, robot_mat, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
     n_robot = len(robot_pos)
 
     # 2. Generate Water Grid
@@ -267,6 +345,8 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         'n_total': n_robot + n_water,
         'n_dead': max_particles - (n_robot + n_water),
         'muscle_count': muscle_count,
+        'n_jelly': int(np.sum(materials[:n_robot] == 1)),
+        'self_intersecting': self_intersecting,
     }
 
 def random_genome():
@@ -297,9 +377,11 @@ if __name__ == "__main__":
         genome = random_genome()
         title = "Random Genome"
 
-    pos, mat = generate_phenotype(genome)
+    pos, mat, self_intersecting = generate_phenotype(genome)
     print(f"{title}: {genome}")
     print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
+    if self_intersecting:
+        print("WARNING: Self-intersecting morphology detected!")
 
     colors = {0: '#4488cc', 1: '#44cc88', 2: '#ff6633', 3: '#ffcc00'}
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
