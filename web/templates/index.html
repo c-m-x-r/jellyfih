@@ -10,7 +10,7 @@
     <div class="container">
         <!-- Header -->
         <header>
-            <h1>JELLYFIH</h1>
+            <h1>BEYOND JELLY: Evolutionary Optimization of Non-Biomimetic Soft Robotic Geometries</h1>
             <p>Soft robotic jellyfish morphology explorer</p>
         </header>
 
@@ -68,9 +68,81 @@
 
                     <dt>Water</dt>
                     <dd id="stat-water">—</dd>
+
+                    <dt>Geometry</dt>
+                    <dd id="stat-geometry">—</dd>
                 </dl>
             </section>
         </main>
+
+        <!-- Evolution Browser -->
+        <section class="panel evolution-browser full-width">
+            <h2>Evolution Browser</h2>
+
+            <div class="evo-controls">
+                <div class="evo-gen-select">
+                    <label for="log-select">Log</label>
+                    <select id="log-select" disabled>
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="evo-gen-select">
+                    <label for="gen-select">Generation</label>
+                    <select id="gen-select" disabled>
+                        <option value="">No data</option>
+                    </select>
+                    <button id="btn-render-gen" class="btn" disabled>Render Generation</button>
+                    <button id="btn-sim-gen" class="btn" disabled>Simulate Generation</button>
+                    <select id="sim-frames">
+                        <option value="50">50 frames</option>
+                        <option value="100" selected>100 frames</option>
+                        <option value="200">200 frames</option>
+                        <option value="300">300 frames (full)</option>
+                    </select>
+                </div>
+                <div class="evo-status" id="evo-status"></div>
+                <div class="sim-progress hidden" id="sim-progress">
+                    <span id="sim-progress-text">Starting simulation...</span>
+                    <div class="sim-progress-bar">
+                        <div class="sim-progress-fill" id="sim-progress-fill"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="evo-table-wrap">
+                <table class="evo-table" id="evo-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Fitness</th>
+                            <th>Final Y</th>
+                            <th>Drift</th>
+                            <th>Muscle</th>
+                            <th>Valid</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="evo-tbody">
+                        <tr><td colspan="7" class="evo-empty">Select a generation above</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="evo-grid-container hidden" id="evo-grid-container">
+                <div id="evo-grid-loading" class="loading hidden">Rendering grid...</div>
+                <img id="evo-grid-img" src="" alt="Generation grid">
+            </div>
+
+            <div class="evo-video-container hidden" id="evo-video-container">
+                <div class="evo-video-header">
+                    <span id="evo-video-label"></span>
+                    <a id="evo-video-link" href="#" target="_blank" class="btn-secondary">Open in new tab</a>
+                </div>
+                <video id="evo-video" controls loop width="100%">
+                    <source id="evo-video-src" src="" type="video/mp4">
+                </video>
+            </div>
+        </section>
 
         <!-- Footer -->
         <footer>

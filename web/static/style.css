@@ -322,6 +322,228 @@ header p {
     text-align: right;
 }
 
+/* Evolution Browser */
+.evolution-browser.full-width {
+    grid-column: 1 / -1;
+}
+
+.evo-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+    flex-wrap: wrap;
+}
+
+.evo-gen-select {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.evo-gen-select label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.evo-gen-select select {
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--border);
+    background: white;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--fg);
+    cursor: pointer;
+}
+
+#log-select {
+    min-width: 200px;
+}
+
+#gen-select {
+    min-width: 320px;
+}
+
+#sim-frames {
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--border);
+    background: white;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--fg);
+    cursor: pointer;
+}
+
+.evo-gen-select select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.evo-status {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+}
+
+/* Individual Table */
+.evo-table-wrap {
+    overflow-x: auto;
+    margin-bottom: var(--space-md);
+}
+
+.evo-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.evo-table thead th {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    text-align: left;
+    padding: var(--space-xs) var(--space-sm);
+    border-bottom: 1px solid var(--border);
+}
+
+.evo-table tbody td {
+    padding: var(--space-xs) var(--space-sm);
+    border-bottom: 1px solid var(--border);
+    color: var(--fg);
+}
+
+.evo-table tbody td.mono {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+}
+
+.evo-table tbody tr:hover {
+    background: var(--bg);
+}
+
+.evo-table tbody tr.best td {
+    font-weight: 600;
+}
+
+.evo-table tbody tr.best td:nth-child(2) {
+    color: var(--accent);
+}
+
+.evo-empty {
+    text-align: center;
+    color: var(--muted);
+    padding: var(--space-lg) !important;
+    font-style: italic;
+}
+
+.btn-load-ind {
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    background: white;
+    color: var(--fg);
+    font-size: 0.7rem;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn-load-ind:hover {
+    background: var(--fg);
+    color: white;
+    border-color: var(--fg);
+}
+
+/* Grid Viewer */
+.evo-grid-container {
+    position: relative;
+    width: 100%;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+}
+
+.evo-grid-container.hidden {
+    display: none;
+}
+
+#evo-grid-img {
+    width: 100%;
+    max-width: 1200px;
+    height: auto;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+/* Simulation Progress */
+.sim-progress {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.sim-progress.hidden {
+    display: none;
+}
+
+.sim-progress-bar {
+    flex: 1;
+    max-width: 300px;
+    height: 4px;
+    background: var(--border);
+    overflow: hidden;
+}
+
+.sim-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+}
+
+#sim-progress-text {
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* Video Player */
+.evo-video-container {
+    margin-top: var(--space-md);
+}
+
+.evo-video-container.hidden {
+    display: none;
+}
+
+.evo-video-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-sm);
+}
+
+#evo-video-label {
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    color: var(--muted);
+}
+
+#evo-video {
+    width: 100%;
+    max-width: 1200px;
+    background: #000;
+}
+
 /* Footer */
 footer {
     margin-top: var(--space-xl);

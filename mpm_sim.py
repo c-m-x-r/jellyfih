@@ -37,7 +37,7 @@ nu_payload = 0.2
 mu_payload = E_payload / (2 * (1 + nu_payload))
 lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
 
-water_lambda = 4000.0
+water_lambda = 3000.0
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
@@ -209,7 +209,7 @@ def substep():
         if material[m, p] != 2:
             v[m, p][1] -= dt * gravity
         else:
-            v[m, p][1] -= dt * gravity * 0.44
+            v[m, p][1] -= dt * gravity * 0.8
         x[m, p] += dt * v[m, p]
         
         for d in ti.static(range(2)):
@@ -341,6 +341,43 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
                             frame_buffer[py, px, 1] += val[1]
                             frame_buffer[py, px, 2] += val[2]
                         
+
+@ti.kernel
+def clear_frame_buffer_white():
+    for i, j, c in frame_buffer:
+        frame_buffer[i, j, c] = 0.98  # Clear to #FAFAFA
+
+
+@ti.kernel
+def render_flat_pass(p_res_sub: int, p_grid_side: int, radius: float,
+                     target_mat: int, cr: float, cg: float, cb: float):
+    """Flat-color renderer matching the web frontend palette.
+    Renders one material at a time for correct layering (water under jelly etc.)."""
+    for m, p in x:
+        pos = x[m, p]
+        mat = material[m, p]
+        if mat != target_mat or pos[0] < 0:
+            continue
+
+        row, col = m // p_grid_side, m % p_grid_side
+        center_x = (pos[0] + col) * p_res_sub
+        center_y = ((1.0 - pos[1]) + row) * p_res_sub
+
+        draw_r = radius
+        low_x = int(center_x - draw_r)
+        high_x = int(center_x + draw_r)
+        low_y = int(center_y - draw_r)
+        high_y = int(center_y + draw_r)
+
+        for px in range(low_x, high_x + 1):
+            for py in range(low_y, high_y + 1):
+                if 0 <= px < video_res and 0 <= py < video_res:
+                    dist_sq = (px - center_x)**2 + (py - center_y)**2
+                    if dist_sq <= draw_r * draw_r:
+                        frame_buffer[py, px, 0] = cr
+                        frame_buffer[py, px, 1] = cg
+                        frame_buffer[py, px, 2] = cb
+
 
 @ti.kernel
 def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):

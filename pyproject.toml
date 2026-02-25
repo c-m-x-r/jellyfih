@@ -3,13 +3,14 @@ name = "jellys"
 version = "0.1.0"
 description = "2D differentiable MPM simulation for jellyfish-inspired soft robot co-design"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.10.0",
     "pillow>=10.0.0",
     "matplotlib>=3.10.8",
     "flask>=3.0.0",
+    "moviepy>=2.2.1",
 ]
 
 [project.optional-dependencies]

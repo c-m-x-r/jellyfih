@@ -32,7 +32,7 @@ from make_jelly import fill_tank, random_genome, AURELIA_GENOME
 GENERATIONS = 50
 STEPS_PER_EVAL = 60000  # 3 actuation cycles at 1Hz, dt=5e-5
 POPSIZE = sim.n_instances  # Must match GPU instances (16)
-START_SIGMA = 0.1
+START_SIGMA = 0.25
 OUTPUT_DIR = "output"
 
 # Genome bounds: [cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, t_base, t_mid, t_tip]
@@ -48,44 +48,54 @@ VIEW_STEPS = 60000       # Sim steps for rendered view
 VIEW_RENDER_EVERY = 200  # Render a frame every N substeps
 VIEW_FPS = 30
 
+# Web palette: material colors matching the web frontend (#E8F4F8, #4ECDC4, #FF6B6B, #FFA500)
+# Rendered in layer order: water first (back), payload last (front)
+WEB_PALETTE = [
+    (0, 0.933, 0.949, 0.957),  # Water:   rgb(238, 242, 244)
+    (1, 0.678, 0.882, 0.875),  # Jelly:   rgb(173, 225, 223)
+    (3, 0.976, 0.757, 0.765),  # Muscle:  rgb(249, 193, 195)
+    (2, 0.961, 0.824, 0.576),  # Payload: rgb(245, 210, 147)
+]
+
+
+def render_frame(radius, web_palette=False):
+    """Render one frame using either the abyss or web palette pipeline."""
+    if web_palette:
+        sim.clear_frame_buffer_white()
+        for mat_id, r, g, b in WEB_PALETTE:
+            sim.render_flat_pass(sim.res_sub, sim.grid_side, radius, mat_id, r, g, b)
+    else:
+        sim.clear_frame_buffer()
+        sim.render_frame_abyss(sim.res_sub, sim.grid_side, radius)
+        sim.tone_map_and_encode()
+
 
 def compute_fitness(sim_results, muscle_counts):
-    """
-    Compute staying-power fitness for all instances.
-
-    Payload is slightly negatively buoyant and sinks without active swimming.
-    Fitness = final payload altitude * lateral stability.
-    No cost ratio — the physics provides implicit cost (more mass = more drag).
-
-    sim_results: (n_instances, 5) from run_batch_headless
-        [init_y, init_x, final_y, final_x, valid]
-    muscle_counts: list of int, muscle particle count per instance
-
-    Returns: list of float (CMA-ES minimizes, so lower = better)
-    """
     scores = []
-
     for i in range(POPSIZE):
+        init_y = sim_results[i, 0]
         init_x = sim_results[i, 1]
         final_y = sim_results[i, 2]
         final_x = sim_results[i, 3]
         valid = sim_results[i, 4]
-
-        # Invalid instance: payload lost or stuck at boundary
+        
         if valid == 0:
             scores.append(PENALTY_INVALID)
             continue
-
-        # Lateral stability: stronger penalty (coeff 50) for drift from initial x
+            
+        # 1. Pure Vertical Gain (Reward moving UP)
+        displacement = final_y - init_y
+        
+        # 2. Drift Penalty (Linear is often better than quadratic for stability)
         drift = abs(final_x - init_x)
-        stability = 1.0 / (1.0 + 50.0 * drift ** 2)
-
-        # Staying power: higher final altitude = better
-        fitness = final_y * stability
-
-        # CMA-ES minimizes, so negate
-        scores.append(-fitness)
-
+        
+        # New Fitness: Move up, don't move side-to-side
+        # If it sinks (negative displacement), this value drops.
+        # We penalize drift heavily (e.g. 1.0m drift cancels 1.0m rise)
+        fitness = displacement 
+        #- (1.0 * drift)
+        
+        scores.append(-fitness) # Minimize negative fitness
     return scores
 
 
@@ -160,11 +170,11 @@ def load_checkpoint(filepath):
         return None
 
 
-def view_best(gen_idx=None):
+def view_best(gen_idx=None, web_palette=False):
     """
     Load best genomes from evolution results and render them in the 4x4 grid.
     Layout: 4 rows (generations) x 4 columns (same genome, color-coded).
-    Column colors: lime, green, turquoise, cyan.
+    Column colors: lime, green, turquoise, cyan (abyss) or flat web palette.
     Saves an MP4 video to output/.
     """
     import imageio.v3 as iio
@@ -223,22 +233,25 @@ def view_best(gen_idx=None):
         for col in range(grid_side):
             genomes.append(row_entries[row]['genome'])
 
-    # Set per-instance hues by column
-    for m in range(POPSIZE):
-        col = m % grid_side
-        sim.instance_hue[m] = col_hues[col]
+    # Set per-instance hues by column (only used for abyss palette)
+    if not web_palette:
+        for m in range(POPSIZE):
+            col = m % grid_side
+            sim.instance_hue[m] = col_hues[col]
 
     # Load genomes into GPU
     print("Loading phenotypes...", flush=True)
     load_batch(genomes)
 
     # Run simulation with rendering
-    video_path = os.path.join(OUTPUT_DIR, f"view_{label}.mp4")
+    palette_suffix = "_web" if web_palette else ""
+    video_path = os.path.join(OUTPUT_DIR, f"view_{label}{palette_suffix}.mp4")
     total_frames = VIEW_STEPS // VIEW_RENDER_EVERY
     radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)
 
+    palette_name = "web" if web_palette else "abyss"
     print(f"Rendering {total_frames} frames ({VIEW_STEPS} steps, "
-          f"1 frame every {VIEW_RENDER_EVERY} substeps)...")
+          f"1 frame every {VIEW_RENDER_EVERY} substeps, palette: {palette_name})...")
 
     sim.sim_time[None] = 0.0
     frames = []
@@ -247,9 +260,7 @@ def view_best(gen_idx=None):
         sim.substep()
 
         if step % VIEW_RENDER_EVERY == 0:
-            sim.clear_frame_buffer()
-            sim.render_frame_abyss(sim.res_sub, sim.grid_side, radius)
-            sim.tone_map_and_encode()
+            render_frame(radius, web_palette=web_palette)
             ti.sync()
 
             img = sim.frame_buffer.to_numpy()
@@ -283,11 +294,15 @@ def evolve(generations):
         run_baseline()
 
         # Initialize CMA-ES with built-in bounds handling
+        # CMA_stds normalizes the search space so mutations are proportional
+        # to each gene's range (e.g. t_tip range 0.03 vs end_y range 0.42)
+        gene_ranges = [hi - lo for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
         opts = {
             'popsize': POPSIZE,
             'bounds': [GENOME_LOWER, GENOME_UPPER],
             'seed': 42,
             'maxiter': generations,
+            'CMA_stds': gene_ranges,
         }
         es = cma.CMAEvolutionStrategy(GENOME_X0, START_SIGMA, opts)
         start_gen = 0
@@ -328,6 +343,13 @@ def evolve(generations):
         sim_results = sim.run_batch_headless(STEPS_PER_EVAL)
         t_sim = time.time() - t0
 
+        # 3.5. Mark self-intersecting morphologies as invalid
+        n_self_intersect = 0
+        for i in range(POPSIZE):
+            if batch_stats[i]['self_intersecting']:
+                sim_results[i, 4] = 0.0
+                n_self_intersect += 1
+
         # 4. Compute fitness
         fitness_values = compute_fitness(sim_results, muscle_counts)
 
@@ -367,11 +389,12 @@ def evolve(generations):
 
         # Console output
         best_alt = sim_results[best_idx, 2]
+        si_str = f" SI: {n_self_intersect}" if n_self_intersect > 0 else ""
         print(f"Gen {gen:3d} | Best: {best_fitness:+.4f} | "
               f"Alt: {best_alt:.4f} | "
               f"Disp: {best_disp:+.4f} | "
               f"Sigma: {es.sigma:.4f} | "
-              f"Invalid: {n_invalid}/{POPSIZE} | "
+              f"Invalid: {n_invalid}/{POPSIZE}{si_str} | "
               f"Load: {t_load:.1f}s Sim: {t_sim:.1f}s")
 
         # Warn if too many invalids
@@ -395,7 +418,7 @@ def evolve(generations):
     print(f"Results saved to {OUTPUT_DIR}/")
 
 
-def eval_aurelia():
+def eval_aurelia(web_palette=False):
     """
     Evaluate the Aurelia aurita reference genome and render a video.
     Runs the same simulation as evolution but with the hand-designed
@@ -431,33 +454,149 @@ def eval_aurelia():
     print(f"    Valid:                    {sim_results[0, 4]}")
 
     # Render video with all 16 showing the same Aurelia
-    col_hues = [0.22, 0.33, 0.44, 0.50]
-    for m in range(POPSIZE):
-        col = m % sim.grid_side
-        sim.instance_hue[m] = col_hues[col]
+    if not web_palette:
+        col_hues = [0.22, 0.33, 0.44, 0.50]
+        for m in range(POPSIZE):
+            col = m % sim.grid_side
+            sim.instance_hue[m] = col_hues[col]
 
     # Reload and re-simulate with rendering
     load_batch(genomes)
-    video_path = os.path.join(OUTPUT_DIR, "view_aurelia.mp4")
+    palette_suffix = "_web" if web_palette else ""
+    video_path = os.path.join(OUTPUT_DIR, f"view_aurelia{palette_suffix}.mp4")
     total_frames = VIEW_STEPS // VIEW_RENDER_EVERY
     radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)
 
-    print(f"\n  Rendering {total_frames} frames to {video_path}...")
+    palette_name = "web" if web_palette else "abyss"
+    print(f"\n  Rendering {total_frames} frames to {video_path} (palette: {palette_name})...")
     sim.sim_time[None] = 0.0
     frames = []
 
     for step in range(VIEW_STEPS):
         sim.substep()
         if step % VIEW_RENDER_EVERY == 0:
-            sim.clear_frame_buffer()
-            sim.render_frame_abyss(sim.res_sub, sim.grid_side, radius)
-            sim.tone_map_and_encode()
+            render_frame(radius, web_palette=web_palette)
             ti.sync()
             img = sim.frame_buffer.to_numpy()
             frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
 
     iio.imwrite(video_path, frames, fps=VIEW_FPS)
     print(f"  Done! Video saved to {video_path}")
+
+
+def load_generation_from_csv(csv_path, gen):
+    """Load all individuals for a generation from an evolution log CSV."""
+    individuals = []
+    with open(csv_path, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row['generation'] == 'generation':
+                continue  # Skip duplicate headers
+            if int(row['generation']) == gen:
+                genome = [float(row[f'gene_{i}']) for i in range(9)]
+                individuals.append({
+                    'individual': int(row['individual']),
+                    'genome': genome,
+                    'fitness': float(row['fitness']),
+                })
+    individuals.sort(key=lambda r: r['individual'])
+    return individuals
+
+
+def sim_generation(gen, log_file='evolution_log.csv', n_frames=100,
+                   web_palette=False):
+    """
+    Simulate all individuals from a generation and render as video.
+    Reads genomes from a CSV log file, loads all 16 into the GPU,
+    and renders n_frames of MPM simulation as a 4x4 grid MP4.
+    Writes progress to output/sim_status.json for web frontend polling.
+    """
+    import imageio.v3 as iio
+
+    csv_path = os.path.join(OUTPUT_DIR, log_file)
+    if not os.path.exists(csv_path):
+        print(f"Error: {csv_path} not found")
+        return None
+
+    individuals = load_generation_from_csv(csv_path, gen)
+    if not individuals:
+        print(f"Error: No individuals found for generation {gen} in {log_file}")
+        return None
+
+    n_ind = len(individuals)
+    print(f"Simulating generation {gen} from {log_file}: {n_ind} individuals, "
+          f"{n_frames} frames")
+
+    # Build genome list for all 16 GPU slots
+    genomes = []
+    for i in range(POPSIZE):
+        if i < n_ind:
+            genomes.append(np.array(individuals[i]['genome']))
+        else:
+            # Pad with the last individual if fewer than 16
+            genomes.append(np.array(individuals[-1]['genome']))
+
+    # Set hues (not used for web palette, but harmless)
+    col_hues = [0.22, 0.33, 0.44, 0.50]
+    for m in range(POPSIZE):
+        col = m % sim.grid_side
+        sim.instance_hue[m] = col_hues[col]
+
+    # Load phenotypes
+    print("Loading phenotypes...", flush=True)
+    load_batch(genomes)
+
+    # Rendering setup
+    log_stem = os.path.splitext(log_file)[0]
+    video_name = f"sim_{log_stem}_gen{gen}.mp4"
+    video_path = os.path.join(OUTPUT_DIR, video_name)
+    status_path = os.path.join(OUTPUT_DIR, "sim_status.json")
+
+    total_steps = n_frames * VIEW_RENDER_EVERY
+    radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)
+    palette_name = "web" if web_palette else "abyss"
+
+    print(f"Rendering {n_frames} frames ({total_steps} steps, "
+          f"palette: {palette_name})...")
+
+    sim.sim_time[None] = 0.0
+    frames = []
+
+    # Write initial status
+    def write_status(frame, total, state='running'):
+        with open(status_path, 'w') as f:
+            json.dump({
+                'state': state,
+                'frame': frame,
+                'total_frames': total,
+                'video': video_name if state == 'done' else None,
+                'generation': gen,
+                'log': log_file,
+            }, f)
+
+    write_status(0, n_frames)
+
+    for step in range(total_steps):
+        sim.substep()
+
+        if step % VIEW_RENDER_EVERY == 0:
+            render_frame(radius, web_palette=web_palette)
+            ti.sync()
+
+            img = sim.frame_buffer.to_numpy()
+            img_uint8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+            frames.append(img_uint8)
+
+            frame_num = len(frames)
+            # Progress output: parseable by web frontend
+            print(f"FRAME {frame_num}/{n_frames}", flush=True)
+            write_status(frame_num, n_frames)
+
+    print(f"Writing video to {video_path}...")
+    iio.imwrite(video_path, frames, fps=VIEW_FPS)
+    write_status(n_frames, n_frames, state='done')
+    print(f"DONE {video_name}")
+    return video_path
 
 
 def main():
@@ -470,14 +609,28 @@ def main():
                         help="Specific generation to view (use with --view)")
     parser.add_argument('--aurelia', action='store_true',
                         help="Evaluate Aurelia aurita reference genome and render video")
+    parser.add_argument('--web-palette', action='store_true',
+                        help="Use web frontend color palette for rendering (light bg, flat colors)")
+    parser.add_argument('--sim-gen', action='store_true',
+                        help="Simulate a full generation from CSV log and render video")
+    parser.add_argument('--log', type=str, default='evolution_log.csv',
+                        help="CSV log file to read (use with --sim-gen)")
+    parser.add_argument('--frames', type=int, default=100,
+                        help="Number of frames to render (use with --sim-gen, default: 100)")
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    if args.aurelia:
-        eval_aurelia()
+    if args.sim_gen:
+        if args.gen is None:
+            print("Error: --sim-gen requires --gen N")
+            return
+        sim_generation(args.gen, log_file=args.log, n_frames=args.frames,
+                       web_palette=args.web_palette)
+    elif args.aurelia:
+        eval_aurelia(web_palette=args.web_palette)
     elif args.view:
-        view_best(gen_idx=args.gen)
+        view_best(gen_idx=args.gen, web_palette=args.web_palette)
     else:
         evolve(args.gens)
 
