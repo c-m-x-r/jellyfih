@@ -1,8 +1,10 @@
 # Beyond Jelly: Evolutionary Soft Robotic Jellyfish
 
+GPU-accelerated evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES and 2D Material Point Method (MPM) simulation.
+
 <img width="1432" height="1235" alt="Screenshot 2026-02-24 220055" src="https://github.com/user-attachments/assets/81f5cb3b-f274-4c53-977a-f27e51b2a7ad" />
 
-GPU-accelerated evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES and 2D Material Point Method (MPM) simulation.
+
 
 ## Overview
 
