@@ -1,14 +1,18 @@
 # Beyond Jelly: Evolutionary Soft Robotic Jellyfish
 
+<img width="1432" height="1235" alt="Screenshot 2026-02-24 220055" src="https://github.com/user-attachments/assets/81f5cb3b-f274-4c53-977a-f27e51b2a7ad" />
+
 GPU-accelerated evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES and 2D Material Point Method (MPM) simulation.
 
 ## Overview
 
 This project explores whether strict biomimetic copying of natural jellyfish shapes is suboptimal for soft robots carrying instrumented payloads. By leveraging evolutionary computation (CMA-ES) within a GPU-accelerated Taichi simulation, we aim to discover novel bell morphologies specifically optimized for payload-carrying applications.
 
-### Hypothesis
+<img width="1139" height="1281" alt="Screenshot 2026-02-24 220202" src="https://github.com/user-attachments/assets/24f17ad6-8eb4-4262-beb1-c4bec5769942" />
 
-Evolutionary strategies applied within GPU-accelerated simulation will converge upon novel bell morphologies that:
+### Hypothesis
+Evolutionary strategies applied within GPU-accelerated simulation will converge upon novel bell 
+morphologies that:
 - Differ significantly from biological baselines when subjected to centralized payloads
 - Exhibit higher propulsive efficiency compared to standard biomimetic designs
 - Demonstrate improved station-keeping stability
