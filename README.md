@@ -19,6 +19,63 @@ morphologies that:
 - Exhibit higher propulsive efficiency compared to standard biomimetic designs
 - Demonstrate improved station-keeping stability
 
+## Configuration
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Actuation | Pulsed active stress | Isotropic pressure on muscle particles |
+| Fitness | Displacement / cost | Proxy for Cost of Transport |
+| Resolution | 128x128 grid | 80K particles, quality=1 |
+| Payload | 0.08 x 0.05 | Material 2, 2.5x density |
+| Boundaries | Damped sides, clamped walls | Damping layer = grid/20 |
+| CMA-ES | lambda=16, sigma=0.1 | Population matches GPU batch size |
+| Sim Duration | 3 cycles (60K steps) | dt=5e-5, freq=1Hz |
+| Spawn | [0.5, 0.4] | Centered, 40% up |
+
+## Genome Encoding
+
+9-dimensional vector controlling bell morphology via cubic Bezier curves:
+
+| Index | Parameter | Description |
+|-------|-----------|-------------|
+| 0-1 | cp1_x, cp1_y | Control Point 1 (curve shaping) |
+| 2-3 | cp2_x, cp2_y | Control Point 2 (curve shaping) |
+| 4-5 | end_x, end_y | Tip position (bell extent) |
+| 6 | t_base | Thickness at payload connection |
+| 7 | t_mid | Thickness at bell middle |
+| 8 | t_tip | Thickness at bell tip |
+
+## Materials
+
+| ID | Material | Properties |
+|----|----------|------------|
+| 0 | Water | Fluid, zero shear modulus |
+| 1 | Jelly | Hyperelastic soft body (mesoglea) |
+| 2 | Payload | Near-rigid, high density (2.5x) |
+| 3 | Muscle | Soft body + pulsed active stress |
+| -1 | Dead | Padding particles (skipped in kernels) |
+
+## Outputs
+
+| File | Description |
+|------|-------------|
+| `evolution_log.csv` | All genomes with fitness, displacement, drift, muscle count, validity per generation |
+| `best_genomes.json` | Best genome per generation for replay |
+| `checkpoint.pkl` | CMA-ES state for crash recovery |
+| `view_*.mp4` | Rendered 4x4 grid videos (column-color-coded) |
+
+## Performance
+
+Benchmarked on CUDA (16 parallel instances, 80K particles each):
+
+| Metric | Value |
+|--------|-------|
+| Substep throughput | ~1.2 ms/step |
+| Per-generation time | ~74s (72s sim + 2s CPU) |
+| 50-generation run | ~62 minutes |
+| GPU-CPU transfer | 16x5 floats/generation |
+
+
 ## Architecture
 
 ```
@@ -127,61 +184,6 @@ uv run python evolve.py --view --gen 3
 uv run python make_jelly.py
 ```
 
-## Configuration
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Actuation | Pulsed active stress | Isotropic pressure on muscle particles |
-| Fitness | Displacement / cost | Proxy for Cost of Transport |
-| Resolution | 128x128 grid | 80K particles, quality=1 |
-| Payload | 0.08 x 0.05 | Material 2, 2.5x density |
-| Boundaries | Damped sides, clamped walls | Damping layer = grid/20 |
-| CMA-ES | lambda=16, sigma=0.1 | Population matches GPU batch size |
-| Sim Duration | 3 cycles (60K steps) | dt=5e-5, freq=1Hz |
-| Spawn | [0.5, 0.4] | Centered, 40% up |
-
-## Genome Encoding
-
-9-dimensional vector controlling bell morphology via cubic Bezier curves:
-
-| Index | Parameter | Description |
-|-------|-----------|-------------|
-| 0-1 | cp1_x, cp1_y | Control Point 1 (curve shaping) |
-| 2-3 | cp2_x, cp2_y | Control Point 2 (curve shaping) |
-| 4-5 | end_x, end_y | Tip position (bell extent) |
-| 6 | t_base | Thickness at payload connection |
-| 7 | t_mid | Thickness at bell middle |
-| 8 | t_tip | Thickness at bell tip |
-
-## Materials
-
-| ID | Material | Properties |
-|----|----------|------------|
-| 0 | Water | Fluid, zero shear modulus |
-| 1 | Jelly | Hyperelastic soft body (mesoglea) |
-| 2 | Payload | Near-rigid, high density (2.5x) |
-| 3 | Muscle | Soft body + pulsed active stress |
-| -1 | Dead | Padding particles (skipped in kernels) |
-
-## Outputs
-
-| File | Description |
-|------|-------------|
-| `evolution_log.csv` | All genomes with fitness, displacement, drift, muscle count, validity per generation |
-| `best_genomes.json` | Best genome per generation for replay |
-| `checkpoint.pkl` | CMA-ES state for crash recovery |
-| `view_*.mp4` | Rendered 4x4 grid videos (column-color-coded) |
-
-## Performance
-
-Benchmarked on CUDA (16 parallel instances, 80K particles each):
-
-| Metric | Value |
-|--------|-------|
-| Substep throughput | ~1.2 ms/step |
-| Per-generation time | ~74s (72s sim + 2s CPU) |
-| 50-generation run | ~62 minutes |
-| GPU-CPU transfer | 16x5 floats/generation |
 
 ## Current Status
 
@@ -205,12 +207,6 @@ Benchmarked on CUDA (16 parallel instances, 80K particles each):
 - [ ] Adaptive resolution (128 -> 256 grid transition)
 - [ ] Genome heatmap visualization
 - [ ] Automatic per-generation video export
-
-## References
-
-1. Gemmell et al. "Passive energy recapture in jellyfish" PNAS 2013
-2. Hansen, N. "The CMA Evolution Strategy: A Tutorial" 2016
-3. Hu et al. "Taichi: High-performance computation" ACM TOG 2019
 
 ## License
 
