@@ -9,7 +9,7 @@ Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES an
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | Actuation | Raised cosine pulse | 20/80 asymmetry, isotropic pressure on muscle (Mat 3) |
-| Fitness | Staying power (altitude) | final_y * stability, no cost ratio |
+| Fitness | Vertical displacement | final_y - init_y (drift penalty currently commented out) |
 | Resolution | 128x128 grid, 80K particles | quality=1, single phase for now |
 | Payload | 0.08 x 0.05 normalized units | Material 2, 2.5x density, 0.44x gravity (slightly neg. buoyant) |
 | Boundaries | Damped sides, clamped top/bottom | n_grid/20 damping layer width |
@@ -49,14 +49,13 @@ Three main components, fully integrated:
 
 ## Fitness Evaluation
 
-**Staying power metric**: Payload is slightly negatively buoyant (sinks without active swimming). Fitness rewards altitude maintenance:
+**Vertical displacement metric**: Fitness rewards upward payload movement over the simulation:
 ```
-drift = |final_x - init_x|
-stability = 1 / (1 + 50 * drift^2)
-fitness = final_y * stability
+displacement = final_y - init_y
+fitness = displacement
 ```
 
-No cost ratio — the physics provides implicit cost. More jelly mass = more gravitational drag. Muscle mass is needed for thrust but has neutral buoyancy. The fitness landscape naturally rewards morphologies that balance thrust, drag, and structural efficiency.
+Drift penalty (`- 1.0 * drift`) is implemented but currently commented out in `evolve.py`. No cost ratio — the physics provides implicit cost (more mass = more drag). The fitness landscape rewards morphologies that efficiently convert muscle actuation into upward thrust.
 
 GPU-side: `compute_payload_stats()` kernel averages all Material 2 particle positions via `ti.atomic_add`. Two separate kernels (clear + compute) to avoid Taichi race conditions.
 
@@ -126,6 +125,20 @@ uv run python make_jelly.py --aurelia  # Moon jelly reference
 
 # Fluid dynamics test visualization
 uv run python fluid_test.py
+
+# Payload sink baseline (no jellyfish, shows payload sinking under gravity)
+uv run python payload_sink.py
+
+# CAD export: generate STL files from a genome
+uv run python make_cad.py --aurelia           # Aurelia reference
+uv run python make_cad.py --gen 5             # Best genome from generation 5
+uv run python make_cad.py --diameter 120      # Physical scale in mm
+
+# Side-by-side comparison video (Aurelia vs Gen 0 vs Gen N)
+uv run python make_comparison.py
+
+# Web viewer (morphology explorer + evolutionary history)
+cd web && python app.py   # http://localhost:5000
 ```
 
 ## Files
@@ -136,7 +149,12 @@ uv run python fluid_test.py
 | make_jelly.py | Morphology generator + tank filler + Aurelia reference |
 | evolve.py | CMA-ES evolutionary loop + visualization + Aurelia eval |
 | fluid_test.py | Fluid dynamics test visualization (oscillating paddle) |
-| pyproject.toml | Dependencies (taichi, numpy, scipy, cma, imageio, etc.) |
+| make_cad.py | CAD export: genome → STL (extruded cross-section + revolved solid) |
+| make_comparison.py | Side-by-side comparison video: Aurelia vs Gen 0 vs Gen N |
+| payload_sink.py | Baseline demo: payload sinking without jellyfish (buoyancy check) |
+| run_population.py | Batch population runner with CV2 rendering |
+| web/ | Flask web viewer: genome sliders, morphology preview, evolutionary history |
+| pyproject.toml | Dependencies (taichi, numpy, scipy, cma, imageio, trimesh, flask, etc.) |
 
 ## Output Files
 
@@ -167,3 +185,4 @@ Benchmarked on CUDA (quality=1, 128x128 grid, 80K particles, 16 instances):
 4. **No genome heatmap**: Post-evolution gene importance visualization not implemented
 5. **No per-generation video**: Only manual --view mode, no automatic video per generation
 6. **No GPU energy tracking**: Full Cost of Transport metric deferred
+7. **Drift penalty disabled**: `- 1.0 * drift` term in `compute_fitness()` is commented out; lateral stability not currently penalized

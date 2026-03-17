@@ -54,10 +54,9 @@ Evolutionary strategies applied within GPU-accelerated simulation will converge 
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Fitness Evaluation                        │
-│  • Vertical payload CoM displacement                        │
-│  • Smooth quadratic lateral stability penalty               │
-│  • Metabolic cost normalization (muscle particle count)     │
+│  • Vertical payload CoM displacement (final_y - init_y)    │
 │  • Boundary-stuck and payload-loss detection                │
+│  • Lateral drift penalty (implemented, currently disabled)  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,6 +67,15 @@ jellyfih/
 ├── mpm_sim.py          # GPU MPM engine + renderer + fitness kernels
 ├── make_jelly.py       # Genotype-phenotype mapping + tank filler
 ├── evolve.py           # CMA-ES evolutionary loop + visualization
+├── make_cad.py         # CAD export: genome → STL (extruded + revolved)
+├── make_comparison.py  # Side-by-side comparison video generator
+├── payload_sink.py     # Baseline: payload sinking without jellyfish
+├── run_population.py   # Batch population runner with CV2 rendering
+├── fluid_test.py       # Fluid dynamics test visualization
+├── web/                # Flask web viewer (genome sliders + evolution history)
+│   ├── app.py
+│   ├── templates/
+│   └── static/
 ├── pyproject.toml      # Project dependencies
 ├── CLAUDE.md           # AI assistant project instructions
 ├── README.md           # This file
@@ -119,20 +127,33 @@ uv run python evolve.py --view --gen 3
 
 # Test morphology generator standalone
 uv run python make_jelly.py
+
+# Payload sink baseline (no jellyfish)
+uv run python payload_sink.py
+
+# CAD export to STL
+uv run python make_cad.py --aurelia
+uv run python make_cad.py --gen 5 --diameter 120
+
+# Side-by-side comparison video
+uv run python make_comparison.py
+
+# Web viewer (genome explorer + evolutionary history)
+cd web && python app.py   # http://localhost:5000
 ```
 
 ## Configuration
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Actuation | Pulsed active stress | Isotropic pressure on muscle particles |
-| Fitness | Displacement / cost | Proxy for Cost of Transport |
+| Actuation | Raised cosine pulse | 20/80 asymmetry, isotropic pressure on muscle |
+| Fitness | Vertical displacement | final_y - init_y (drift penalty currently disabled) |
 | Resolution | 128x128 grid | 80K particles, quality=1 |
-| Payload | 0.08 x 0.05 | Material 2, 2.5x density |
+| Payload | 0.08 x 0.05 | Material 2, 2.5x density, 0.44x gravity |
 | Boundaries | Damped sides, clamped walls | Damping layer = grid/20 |
 | CMA-ES | lambda=16, sigma=0.1 | Population matches GPU batch size |
 | Sim Duration | 3 cycles (60K steps) | dt=5e-5, freq=1Hz |
-| Spawn | [0.5, 0.4] | Centered, 40% up |
+| Spawn | [0.5, 0.7] | Centered, 70% up from bottom |
 
 ## Genome Encoding
 
@@ -195,7 +216,7 @@ Benchmarked on CUDA (16 parallel instances, 80K particles each):
 
 ### TODO
 - [ ] Full Cost of Transport fitness (GPU energy tracking)
-- [ ] Aurelia aurita baseline genome
+- [ ] Re-enable drift penalty in fitness function
 - [ ] Adaptive resolution (128 -> 256 grid transition)
 - [ ] Genome heatmap visualization
 - [ ] Automatic per-generation video export
