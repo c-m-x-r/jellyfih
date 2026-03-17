@@ -48,7 +48,7 @@ def render_morphology(genome, size=(6, 8)):
         genome_arr = np.array(genome, dtype=np.float64)
 
         # Generate phenotype
-        pos, mat, stats = fill_tank(genome_arr, N_PARTICLES, grid_res=GRID_RES)
+        pos, mat, _, stats = fill_tank(genome_arr, N_PARTICLES, grid_res=GRID_RES)
 
         # Create figure with transparent background
         fig, ax = plt.subplots(figsize=size, facecolor='none')
@@ -250,7 +250,7 @@ def api_render_grid():
             ind = individuals[idx]
             genome = ind['genome']
             try:
-                pos, mat, stats = fill_tank(
+                pos, mat, _, stats = fill_tank(
                     np.array(genome, dtype=np.float64),
                     N_PARTICLES, grid_res=GRID_RES)
 

@@ -26,11 +26,11 @@ import pickle
 
 import taichi as ti
 import mpm_sim as sim
-from make_jelly import fill_tank, random_genome, AURELIA_GENOME
+from make_jelly import fill_tank, random_genome, AURELIA_GENOME, DEFAULT_SPAWN
 
 # --- CONFIGURATION ---
 GENERATIONS = 50
-STEPS_PER_EVAL = 60000  # 3 actuation cycles at 1Hz, dt=5e-5
+STEPS_PER_EVAL = 100000  # 5 actuation cycles at 1Hz, dt=5e-5
 POPSIZE = sim.n_instances  # Must match GPU instances (16)
 START_SIGMA = 0.25
 OUTPUT_DIR = "output"
@@ -44,7 +44,7 @@ GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 PENALTY_INVALID = 100.0
 
 # View mode constants
-VIEW_STEPS = 60000       # Sim steps for rendered view
+VIEW_STEPS = 100000      # Sim steps for rendered view (matches eval duration)
 VIEW_RENDER_EVERY = 200  # Render a frame every N substeps
 VIEW_FPS = 30
 
@@ -99,24 +99,41 @@ def compute_fitness(sim_results, muscle_counts):
     return scores
 
 
-def load_batch(genomes):
+def load_batch(genomes, spawn_jitter=0.0):
     """
     Generate phenotypes and load all instances to GPU.
     Returns muscle_counts list and per-instance stats.
+    spawn_jitter: uniform random offset (±) applied to spawn position for trial variance.
     """
     muscle_counts = []
     instance_stats = []
 
     for i, genome in enumerate(genomes):
-        pos, mat, stats = fill_tank(
-            genome, sim.n_particles, grid_res=int(sim.n_grid)
+        jitter = np.random.uniform(-spawn_jitter, spawn_jitter, 2) if spawn_jitter > 0 else 0
+        pos, mat, fiber_dirs, stats = fill_tank(
+            genome, sim.n_particles, grid_res=int(sim.n_grid),
+            spawn_offset=DEFAULT_SPAWN + jitter
         )
-        sim.load_particles(i, pos, mat)
+        if sim.use_anisotropic_actuation:
+            sim.load_particles(i, pos, mat, fiber_dirs)
+        else:
+            sim.load_particles(i, pos, mat)
         muscle_counts.append(stats['muscle_count'])
         instance_stats.append(stats)
 
     ti.sync()
     return muscle_counts, instance_stats
+
+
+def average_batch_results(results_1, results_2):
+    """Average two trial results. Invalid if EITHER trial is invalid."""
+    averaged = np.zeros((POPSIZE, 5), dtype=np.float64)
+    variances = np.zeros(POPSIZE, dtype=np.float64)
+    for i in range(POPSIZE):
+        averaged[i, 0:4] = (results_1[i, 0:4] + results_2[i, 0:4]) / 2.0
+        averaged[i, 4] = 1.0 if (results_1[i, 4] > 0 and results_2[i, 4] > 0) else 0.0
+        variances[i] = ((results_1[i, 2] - results_2[i, 2]) ** 2) / 4.0
+    return averaged, variances
 
 
 def run_baseline():
@@ -314,7 +331,7 @@ def evolve(generations):
     csv_writer = csv.writer(csv_file)
     if not csv_exists:
         header = ['generation', 'individual'] + [f'gene_{i}' for i in range(9)] + \
-                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma']
+                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma', 'trial_variance']
         csv_writer.writerow(header)
         csv_file.flush()
 
@@ -333,22 +350,36 @@ def evolve(generations):
         # 1. Get candidate genomes from CMA-ES
         genomes = es.ask()
 
-        # 2. Generate phenotypes and load to GPU (CPU)
+        # 2. Trial 1: Generate phenotypes and load to GPU
         t0 = time.time()
-        muscle_counts, batch_stats = load_batch(genomes)
+        muscle_counts_1, batch_stats_1 = load_batch(genomes)
         t_load = time.time() - t0
 
-        # 3. Run physics simulation (GPU, headless)
+        # 3. Trial 1: Run physics simulation (GPU, headless)
         t0 = time.time()
-        sim_results = sim.run_batch_headless(STEPS_PER_EVAL)
+        sim_results_1 = sim.run_batch_headless(STEPS_PER_EVAL)
         t_sim = time.time() - t0
 
-        # 3.5. Mark self-intersecting morphologies as invalid
+        # Trial 2: Same genomes with small spawn jitter for stochasticity
+        t0 = time.time()
+        muscle_counts_2, batch_stats_2 = load_batch(genomes, spawn_jitter=0.002)
+        t_load += time.time() - t0
+
+        t0 = time.time()
+        sim_results_2 = sim.run_batch_headless(STEPS_PER_EVAL)
+        t_sim += time.time() - t0
+
+        # Mark self-intersecting (either trial invalid → both invalid)
         n_self_intersect = 0
         for i in range(POPSIZE):
-            if batch_stats[i]['self_intersecting']:
-                sim_results[i, 4] = 0.0
+            if batch_stats_1[i]['self_intersecting'] or batch_stats_2[i]['self_intersecting']:
+                sim_results_1[i, 4] = 0.0
+                sim_results_2[i, 4] = 0.0
                 n_self_intersect += 1
+
+        # Average the two trials
+        sim_results, trial_variances = average_batch_results(sim_results_1, sim_results_2)
+        muscle_counts, batch_stats = muscle_counts_1, batch_stats_1
 
         # 4. Compute fitness
         fitness_values = compute_fitness(sim_results, muscle_counts)
@@ -371,7 +402,7 @@ def evolve(generations):
             final_y = sim_results[ind, 2]
             row = [gen, ind] + list(genomes[ind]) + [
                 -fitness_values[ind], final_y, disp, drift,
-                muscle_counts[ind], int(valid), es.sigma
+                muscle_counts[ind], int(valid), es.sigma, trial_variances[ind]
             ]
             csv_writer.writerow(row)
         csv_file.flush()

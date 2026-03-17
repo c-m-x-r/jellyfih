@@ -38,6 +38,11 @@ mu_payload = E_payload / (2 * (1 + nu_payload))
 lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
 
 water_lambda = 3000.0
+water_mu = 50.0   # Water bulk stiffness (not viscosity). Provides pressure-based drag via elastic stiffness.
+                  # Higher values slow particle displacement; ≥150 makes water gel-like and unphysical.
+grid_drag = 0.0   # Brinkman drag per grid node per step (0 = disabled). Overshoots easily; use water_mu instead.
+payload_gravity_factor = 0.80  # Gravity scaling for payload. Net downward = 2.5×0.80 - 1.0 = 1.0× (slight neg. buoyancy).
+                                # Physical basis: AUV neutrally buoyant by design; 2.5× inertial mass drives selection.
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
@@ -66,6 +71,10 @@ frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
 # Fitness evaluation buffer: [sum_y, count, sum_x] per instance
 fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
+
+# Circumferential fiber directions for anisotropic actuation (Mat 3)
+fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
+use_anisotropic_actuation = False  # Feature flag; set True before first substep() call to enable
 
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
@@ -122,7 +131,7 @@ def substep():
             current_mass *= 2.5
             
         elif material[m, p] == 0:  # Water
-            mu, la = 0.0, water_lambda
+            mu, la = water_mu, water_lambda  # mu=0: no elastic shear; la sets pressure-volume law
 
         # SVD & Plasticity
         U, sig, V = ti.svd(F[m, p])
@@ -147,11 +156,15 @@ def substep():
         # Stress Calculation
         stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
                  ti.Matrix.identity(float, 2) * la * J * (J - 1)
-        
+
         # Active Muscle Stress
         if material[m, p] == 3:
             contractile_pressure = actuation_strength * activation
-            stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
+            if ti.static(use_anisotropic_actuation):
+                fd = fiber_dir[m, p].normalized()
+                stress += fd.outer_product(fd) * contractile_pressure * J
+            else:
+                stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
 
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
         
@@ -171,9 +184,9 @@ def substep():
         if grid_m[m, i, j] > 0:
             grid_v[m, i, j] /= grid_m[m, i, j]
             
-            # STABILIZATION: Global Damping
-            # Bleeds off excess energy from numerical errors (1% drag)
-            #grid_v[m, i, j] *= 0.99998
+            # Brinkman drag (disabled: grid_drag=0). Only active if grid_drag > 0.
+            if ti.static(grid_drag > 0):
+                grid_v[m, i, j] *= (1.0 - grid_drag)
             
             # Boundary Damping
             damp_cells = n_grid // 20
@@ -206,10 +219,8 @@ def substep():
                 new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             v[m, p], C[m, p] = new_v, new_C
 
-        if material[m, p] != 2:
-            v[m, p][1] -= dt * gravity
-        else:
-            v[m, p][1] -= dt * gravity * 0.8
+        g_factor = payload_gravity_factor if material[m, p] == 2 else 1.0
+        v[m, p][1] -= dt * gravity * g_factor
         x[m, p] += dt * v[m, p]
         
         for d in ti.static(range(2)):
@@ -380,7 +391,7 @@ def render_flat_pass(p_res_sub: int, p_grid_side: int, radius: float,
 
 
 @ti.kernel
-def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
+def _load_particles_kernel(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
     """Reset a specific instance with new particle data."""
     for p in range(n_particles):
         x[instance, p] = [pos_np[p, 0], pos_np[p, 1]]
@@ -389,6 +400,29 @@ def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.n
         F[instance, p] = ti.Matrix.identity(float, 2)
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
+
+
+@ti.kernel
+def _load_fiber_kernel(instance: int, fiber_np: ti.types.ndarray()):
+    """Load per-particle fiber directions for anisotropic actuation."""
+    for p in range(n_particles):
+        fiber_dir[instance, p] = [fiber_np[p, 0], fiber_np[p, 1]]
+
+
+@ti.kernel
+def _load_fiber_default(instance: int):
+    """Fill fiber directions with default [1, 0] (unused placeholder)."""
+    for p in range(n_particles):
+        fiber_dir[instance, p] = [1.0, 0.0]
+
+
+def load_particles(instance, pos_np, mat_np, fiber_np=None):
+    """Python dispatcher: load particles and optionally fiber directions."""
+    _load_particles_kernel(instance, pos_np, mat_np)
+    if fiber_np is not None:
+        _load_fiber_kernel(instance, fiber_np)
+    else:
+        _load_fiber_default(instance)
 
 # --- FITNESS EVALUATION KERNELS ---
 

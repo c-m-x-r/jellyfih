@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05
-DEFAULT_SPAWN = np.array([0.5, 0.7])
+DEFAULT_SPAWN = np.array([0.5, 0.5])  # Centered; gives 0.43 units ceiling headroom for 5 cycles
 
 # Aurelia aurita (moon jelly) reference genome:
 # Wide, shallow bell with moderate thickness — biomimetic baseline.
@@ -267,24 +267,35 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     pgx, pgy = np.meshgrid(px, py)
     payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
     
-    # 9. Combine & Apply spawn offset
-    offset = np.array(spawn_offset)
-
+    # 9. Compute circumferential fiber directions (for anisotropic actuation)
     final_pos = []
     final_mat = []
+    final_fiber = []
+    offset = np.array(spawn_offset)
 
     if len(all_soft_pos) > 0:
+        bell_center = np.array([0.0, PAYLOAD_HEIGHT / 2.0])  # Local coords
+        relative = all_soft_pos - bell_center
+        dist = np.linalg.norm(relative, axis=1, keepdims=True)
+        dist[dist < 1e-10] = 1.0
+        radial = relative / dist
+        circumferential = np.stack([-radial[:, 1], radial[:, 0]], axis=1)  # 90° CCW
+
         final_pos.append(all_soft_pos + offset)
-        final_mat.append(all_soft_mats) 
+        final_mat.append(all_soft_mats)
+        final_fiber.append(circumferential)
 
     if len(payload_particles) > 0:
+        n_payload = len(payload_particles)
         final_pos.append(payload_particles + offset)
-        final_mat.append(np.ones(len(payload_particles), dtype=int) * 2)
+        final_mat.append(np.ones(n_payload, dtype=int) * 2)
+        final_fiber.append(np.tile([0.0, 1.0], (n_payload, 1)))
 
     if len(final_pos) > 0:
-        return np.vstack(final_pos), np.concatenate(final_mat).astype(int), self_intersecting
+        return (np.vstack(final_pos), np.concatenate(final_mat).astype(int),
+                np.vstack(final_fiber).astype(np.float32), self_intersecting)
     else:
-        return np.zeros((0, 2)), np.zeros(0, dtype=int), True
+        return np.zeros((0, 2)), np.zeros(0, dtype=int), np.zeros((0, 2), dtype=np.float32), True
 
 def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
     """
@@ -294,7 +305,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         spawn_offset = DEFAULT_SPAWN
 
     # 1. Generate robot particles
-    robot_pos, robot_mat, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
+    robot_pos, robot_mat, robot_fiber, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
     n_robot = len(robot_pos)
 
     # 2. Generate Water Grid
@@ -327,19 +338,22 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     # 5. Allocate fixed-size arrays
     positions = np.full((max_particles, 2), -1.0, dtype=np.float32)
     materials = np.full(max_particles, -1, dtype=np.int32)
+    fiber_dirs = np.zeros((max_particles, 2), dtype=np.float32)
+    fiber_dirs[:, 0] = 1.0  # Default [1, 0] for dead/water particles
 
     # 6. Fill
     if n_robot > 0:
         positions[:n_robot] = robot_pos
         materials[:n_robot] = robot_mat
+        fiber_dirs[:n_robot] = robot_fiber
 
     if n_water > 0:
         positions[n_robot:n_robot + n_water] = water_pos[:n_water]
-        materials[n_robot:n_robot + n_water] = 0 
+        materials[n_robot:n_robot + n_water] = 0
 
     muscle_count = int(np.sum(materials[:n_robot] == 3))
 
-    return positions, materials, {
+    return positions, materials, fiber_dirs, {
         'n_robot': n_robot,
         'n_water': n_water,
         'n_total': n_robot + n_water,
@@ -377,7 +391,7 @@ if __name__ == "__main__":
         genome = random_genome()
         title = "Random Genome"
 
-    pos, mat, self_intersecting = generate_phenotype(genome)
+    pos, mat, _fiber, self_intersecting = generate_phenotype(genome)
     print(f"{title}: {genome}")
     print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
     if self_intersecting:
