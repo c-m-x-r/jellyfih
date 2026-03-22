@@ -23,7 +23,7 @@ def generate_population(n_instances, n_particles):
         genome = random_genome()
         genomes.append(genome)
         # Ensure grid_res matches simulation physics
-        pos, mat, info = fill_tank(genome, n_particles, grid_res=int(sim.n_grid/sim.quality))
+        pos, mat, _, info = fill_tank(genome, n_particles, grid_res=int(sim.n_grid/sim.quality))
         all_positions[i] = pos
         all_materials[i] = mat
         stats.append(info)

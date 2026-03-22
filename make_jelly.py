@@ -91,6 +91,12 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     # 2. Generate Spine Curve
     t_steps = np.linspace(0, 1, 50)
     spine_points = np.array([cubic_bezier(start_p, cp1, cp2, end_p, t) for t in t_steps])
+
+    # Compute unit tangents along the spine (used for fiber-aligned muscle actuation)
+    spine_tangent_raw = np.gradient(spine_points, axis=0)
+    spine_tangent_norms = np.linalg.norm(spine_tangent_raw, axis=1, keepdims=True)
+    spine_tangent_norms[spine_tangent_norms < 1e-10] = 1.0
+    spine_tangents = spine_tangent_raw / spine_tangent_norms  # (50, 2)
     
     # 3. Generate Envelope (Flesh + Muscle)
     normals = get_normals_2d(spine_points)
@@ -241,24 +247,33 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     mask_right_side = (candidate_points[:, 0] >= 0) & (final_mats > 0)
     right_points = candidate_points[mask_right_side]
     right_mats = final_mats[mask_right_side]
-    
+
+    # Assign fiber directions to right-side muscle particles (tangent along bell wall)
+    right_fiber = np.zeros((len(right_points), 2), dtype=np.float32)
+    right_fiber[:, 1] = 1.0  # default: y-axis (for non-muscle particles)
+    if len(right_points) > 0 and np.any(right_mats == 3):
+        from scipy.spatial import cKDTree as _cKDTree
+        spine_tree = _cKDTree(spine_points)
+        muscle_mask_r = right_mats == 3
+        _, sp_idx = spine_tree.query(right_points[muscle_mask_r])
+        right_fiber[muscle_mask_r] = spine_tangents[sp_idx]
+
     # 7. Mirror to create Full Body
     if len(right_points) > 0:
         left_pos = right_points.copy()
-        left_pos[:, 0] *= -1 
+        left_pos[:, 0] *= -1
         left_mats = right_mats.copy()
-        
-        # Combine
+        # Mirror fiber x-component for the left side
+        left_fiber = right_fiber.copy()
+        left_fiber[:, 0] *= -1
+
         all_soft_pos = np.vstack([right_points, left_pos])
         all_soft_mats = np.concatenate([right_mats, left_mats])
-        
-        # Add the Central Bridge Slice (strip near x=0 that might get missed by mirror gap)
-        # Or better: The Bridge mask above covers -W to W. 
-        # But we only extracted x>=0. Mirroring x>=0 covers x<=0. 
-        # This works perfectly.
+        all_soft_fiber = np.vstack([right_fiber, left_fiber])
     else:
         all_soft_pos = np.zeros((0, 2))
         all_soft_mats = np.zeros(0, dtype=int)
+        all_soft_fiber = np.zeros((0, 2), dtype=np.float32)
 
     # 8. Generate Payload (Material 2)
     # Explicitly generated to ensure it fits perfectly in the gap we left
@@ -272,19 +287,27 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
 
     final_pos = []
     final_mat = []
+    final_fiber = []
 
     if len(all_soft_pos) > 0:
         final_pos.append(all_soft_pos + offset)
-        final_mat.append(all_soft_mats) 
+        final_mat.append(all_soft_mats)
+        final_fiber.append(all_soft_fiber)
 
     if len(payload_particles) > 0:
         final_pos.append(payload_particles + offset)
         final_mat.append(np.ones(len(payload_particles), dtype=int) * 2)
+        pf = np.zeros((len(payload_particles), 2), dtype=np.float32)
+        pf[:, 1] = 1.0
+        final_fiber.append(pf)
 
     if len(final_pos) > 0:
-        return np.vstack(final_pos), np.concatenate(final_mat).astype(int), self_intersecting
+        return (np.vstack(final_pos),
+                np.concatenate(final_mat).astype(int),
+                np.vstack(final_fiber).astype(np.float32),
+                self_intersecting)
     else:
-        return np.zeros((0, 2)), np.zeros(0, dtype=int), True
+        return np.zeros((0, 2)), np.zeros(0, dtype=int), np.zeros((0, 2), dtype=np.float32), True
 
 def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
     """
@@ -294,7 +317,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         spawn_offset = DEFAULT_SPAWN
 
     # 1. Generate robot particles
-    robot_pos, robot_mat, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
+    robot_pos, robot_mat, robot_fiber, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
     n_robot = len(robot_pos)
 
     # 2. Generate Water Grid
@@ -327,19 +350,22 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     # 5. Allocate fixed-size arrays
     positions = np.full((max_particles, 2), -1.0, dtype=np.float32)
     materials = np.full(max_particles, -1, dtype=np.int32)
+    fibers = np.zeros((max_particles, 2), dtype=np.float32)
+    fibers[:, 1] = 1.0  # default (0, 1) for water/dead particles
 
     # 6. Fill
     if n_robot > 0:
         positions[:n_robot] = robot_pos
         materials[:n_robot] = robot_mat
+        fibers[:n_robot] = robot_fiber
 
     if n_water > 0:
         positions[n_robot:n_robot + n_water] = water_pos[:n_water]
-        materials[n_robot:n_robot + n_water] = 0 
+        materials[n_robot:n_robot + n_water] = 0
 
     muscle_count = int(np.sum(materials[:n_robot] == 3))
 
-    return positions, materials, {
+    return positions, materials, fibers, {
         'n_robot': n_robot,
         'n_water': n_water,
         'n_total': n_robot + n_water,
@@ -377,7 +403,7 @@ if __name__ == "__main__":
         genome = random_genome()
         title = "Random Genome"
 
-    pos, mat, self_intersecting = generate_phenotype(genome)
+    pos, mat, _, self_intersecting = generate_phenotype(genome)
     print(f"{title}: {genome}")
     print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
     if self_intersecting:

@@ -1,3 +1,4 @@
+import os
 import taichi as ti
 import numpy as np
 import math
@@ -7,12 +8,12 @@ ti.set_logging_level(ti.ERROR)
 ti.init(arch=ti.cuda)  # CUDA required
 
 # Simulation Constants
-n_instances = 16
+n_instances = int(os.environ.get('JELLY_INSTANCES', '16'))
 quality = 1  # 1=low-res (128 grid), 2=high-res (256 grid)
 n_particles = 80000
 n_grid = 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
-dt = 5e-5 / quality
+dt = 2e-5 / quality
 p_vol = (dx * 0.5) ** 2
 p_rho = 1
 p_mass = p_vol * p_rho
@@ -37,7 +38,7 @@ nu_payload = 0.2
 mu_payload = E_payload / (2 * (1 + nu_payload))
 lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
 
-water_lambda = 3000.0
+water_lambda = 100000.0
 gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
@@ -66,6 +67,9 @@ frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
 # Fitness evaluation buffer: [sum_y, count, sum_x] per instance
 fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
+
+# Per-particle fiber direction for tangent-aligned muscle actuation
+fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
@@ -148,10 +152,11 @@ def substep():
         stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
                  ti.Matrix.identity(float, 2) * la * J * (J - 1)
         
-        # Active Muscle Stress
+        # Active Muscle Stress (tangent-aligned: contracts along bell wall, not isotropically)
         if material[m, p] == 3:
             contractile_pressure = actuation_strength * activation
-            stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
+            fd = fiber_dir[m, p]
+            stress += fd.outer_product(fd) * contractile_pressure * J
 
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
         
@@ -380,7 +385,8 @@ def render_flat_pass(p_res_sub: int, p_grid_side: int, radius: float,
 
 
 @ti.kernel
-def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.ndarray()):
+def _load_particles_kernel(instance: int, pos_np: ti.types.ndarray(),
+                           mat_np: ti.types.ndarray(), fiber_np: ti.types.ndarray()):
     """Reset a specific instance with new particle data."""
     for p in range(n_particles):
         x[instance, p] = [pos_np[p, 0], pos_np[p, 1]]
@@ -389,6 +395,16 @@ def load_particles(instance: int, pos_np: ti.types.ndarray(), mat_np: ti.types.n
         F[instance, p] = ti.Matrix.identity(float, 2)
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
+        fiber_dir[instance, p] = [fiber_np[p, 0], fiber_np[p, 1]]
+
+
+def load_particles(instance, pos_np, mat_np, fiber_np=None):
+    """Reset a specific instance. fiber_np: (n_particles, 2) unit tangent vectors for muscle;
+    defaults to (0, 1) for all particles if not provided."""
+    if fiber_np is None:
+        fiber_np = np.zeros((n_particles, 2), dtype=np.float32)
+        fiber_np[:, 1] = 1.0
+    _load_particles_kernel(instance, pos_np, mat_np, fiber_np)
 
 # --- FITNESS EVALUATION KERNELS ---
 

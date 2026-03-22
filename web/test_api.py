@@ -43,7 +43,7 @@ print()
 print("3. Phenotype generation (morphology):")
 try:
     genome = AURELIA_GENOME
-    pos, mat, stats = fill_tank(genome, 80000, grid_res=128)
+    pos, mat, _, stats = fill_tank(genome, 80000, grid_res=128)
     print(f"   Particles: {stats['n_total']:,}")
     print(f"   Robot: {stats['n_robot']:,}")
     print(f"   Muscle: {stats['muscle_count']:,}")

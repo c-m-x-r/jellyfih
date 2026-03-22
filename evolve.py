@@ -24,13 +24,19 @@ import csv
 import json
 import pickle
 
+# Pre-parse --instances so env var is set before mpm_sim import (Taichi allocates on import)
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument('--instances', type=int, default=16)
+_pre_args, _ = _pre.parse_known_args()
+os.environ['JELLY_INSTANCES'] = str(_pre_args.instances)
+
 import taichi as ti
 import mpm_sim as sim
 from make_jelly import fill_tank, random_genome, AURELIA_GENOME
 
 # --- CONFIGURATION ---
 GENERATIONS = 50
-STEPS_PER_EVAL = 60000  # 3 actuation cycles at 1Hz, dt=5e-5
+STEPS_PER_EVAL = 150000  # 3 actuation cycles at 1Hz, dt=2e-5
 POPSIZE = sim.n_instances  # Must match GPU instances (16)
 START_SIGMA = 0.25
 OUTPUT_DIR = "output"
@@ -44,8 +50,8 @@ GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 PENALTY_INVALID = 100.0
 
 # View mode constants
-VIEW_STEPS = 60000       # Sim steps for rendered view
-VIEW_RENDER_EVERY = 200  # Render a frame every N substeps
+VIEW_STEPS = 150000      # Sim steps for rendered view (3 actuation cycles at 1Hz, dt=2e-5)
+VIEW_RENDER_EVERY = 500  # Render a frame every N substeps (~same sim-time per frame as before)
 VIEW_FPS = 30
 
 # Web palette: material colors matching the web frontend (#E8F4F8, #4ECDC4, #FF6B6B, #FFA500)
@@ -108,10 +114,10 @@ def load_batch(genomes):
     instance_stats = []
 
     for i, genome in enumerate(genomes):
-        pos, mat, stats = fill_tank(
+        pos, mat, fiber, stats = fill_tank(
             genome, sim.n_particles, grid_res=int(sim.n_grid)
         )
-        sim.load_particles(i, pos, mat)
+        sim.load_particles(i, pos, mat, fiber)
         muscle_counts.append(stats['muscle_count'])
         instance_stats.append(stats)
 
@@ -600,6 +606,8 @@ def sim_generation(gen, log_file='evolution_log.csv', n_frames=100,
 
 
 def main():
+    from datetime import datetime
+
     parser = argparse.ArgumentParser(description="Jellyfish evolutionary optimizer")
     parser.add_argument('--gens', type=int, default=GENERATIONS,
                         help=f"Number of generations (default: {GENERATIONS})")
@@ -617,9 +625,17 @@ def main():
                         help="CSV log file to read (use with --sim-gen)")
     parser.add_argument('--frames', type=int, default=100,
                         help="Number of frames to render (use with --sim-gen, default: 100)")
+    parser.add_argument('--run-id', type=str, default=None,
+                        help="Run identifier for output directory (default: auto timestamp YYYYMMDD_HHMMSS)")
+    parser.add_argument('--instances', type=int, default=16,
+                        help="Number of parallel GPU instances / CMA-ES population size (default: 16)")
     args = parser.parse_args()
 
+    global OUTPUT_DIR
+    run_id = args.run_id or datetime.now().strftime('%Y%m%d_%H%M%S')
+    OUTPUT_DIR = os.path.join('output', run_id)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"Run ID: {run_id}  →  {OUTPUT_DIR}/")
 
     if args.sim_gen:
         if args.gen is None:
