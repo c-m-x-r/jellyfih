@@ -58,7 +58,7 @@ grid_side = int(math.ceil(math.sqrt(n_instances)))
 res_sub = video_res // grid_side
 
 # --- GPU MEMORY ALLOCATION ---
-print(f"Allocating {n_instances} instances with {n_particles} particles each...")
+print(f"Allocating {n_instances} instances with {n_particles} particles each...", flush=True)
 x = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 C = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))

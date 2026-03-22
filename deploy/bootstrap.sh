@@ -64,6 +64,17 @@ echo "  OK"
 echo ""
 echo "=== [5/6] Checking GPU and checkpoint ==="
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+
+# Fix: CUDA 12.x images ship a compat libcuda.so (e.g. 530) but vast.ai hosts
+# run newer drivers (e.g. 580). Taichi needs an unversioned libcuda.so that
+# resolves to the *host* driver, not the compat stub. Create the symlink if missing.
+LIBCUDA_DIR="/lib/x86_64-linux-gnu"
+if [ ! -e "$LIBCUDA_DIR/libcuda.so" ] && [ -e "$LIBCUDA_DIR/libcuda.so.1" ]; then
+    echo "  Fixing libcuda.so symlink (driver/compat mismatch workaround)"
+    ln -sf "$LIBCUDA_DIR/libcuda.so.1" "$LIBCUDA_DIR/libcuda.so"
+    ldconfig
+fi
+
 mkdir -p "$WORKDIR/output"
 if [ -f "$WORKDIR/output/checkpoint.pkl" ]; then
     echo "  checkpoint.pkl found — run will RESUME from last checkpoint"
@@ -73,8 +84,29 @@ fi
 
 echo ""
 echo "=== [6/6] Starting evolve.py ==="
-# Copy tmux config if present on this machine
-[ -f "$HOME/.tmux.conf" ] && cp "$HOME/.tmux.conf" /root/.tmux.conf
+# Write tmux config (WSL clip.exe binding omitted — not available on container)
+cat > /root/.tmux.conf << 'TMUXCONF'
+# --- General Settings ---
+set -g mouse on               # Enable mouse mode
+set -g base-index 1           # Start windows at 1
+setw -g pane-base-index 1     # Start panes at 1
+set -g renumber-windows on    # Automatically renumber windows
+set -g status-interval 5      # Update status bar more often
+
+# --- Key Remaps ---
+unbind C-b
+set -g prefix `
+bind ` send-prefix
+
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+
+# --- Selection ---
+setw -g mode-keys vi
+
+# --- Automatic Layout ---
+set-hook -g session-created 'split-window -h; split-window -v; select-pane -t 1'
+TMUXCONF
 
 # vast.ai wraps SSH in its own tmux session (ssh_tmux).
 # If we're already inside tmux, use TMUX='' to allow nesting; otherwise create normally.
