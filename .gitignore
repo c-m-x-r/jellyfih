@@ -1,3 +1,6 @@
+# Local notes — unpolished docs, scratchpad, not for repo
+notes/
+
 # Python-generated files
 __pycache__/
 *.py[oc]

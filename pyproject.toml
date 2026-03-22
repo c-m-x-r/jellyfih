@@ -8,6 +8,7 @@ dependencies = [
     # Simulation core — the only deps needed to run evolve.py headless on a cloud GPU
     "numpy>=1.24.0",
     "scipy>=1.10.0",
+    "matplotlib>=3.10.8",
     "taichi>=1.7.0",
     "cma>=4.0.0",
 ]

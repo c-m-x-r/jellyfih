@@ -72,20 +72,24 @@ else
 fi
 
 echo ""
-echo "=== [6/6] Starting evolve.py in tmux session 'evo' ==="
-# Kill any existing session to avoid conflicts on re-runs
-tmux kill-session -t evo 2>/dev/null || true
+echo "=== [6/6] Starting evolve.py ==="
+# Copy tmux config if present on this machine
+[ -f "$HOME/.tmux.conf" ] && cp "$HOME/.tmux.conf" /root/.tmux.conf
 
-tmux new-session -d -s evo "cd $WORKDIR && \
-    export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH\" && \
-    uv run python evolve.py --no-thermal --gens $N_GENS 2>&1 | tee output/run.log"
+# vast.ai wraps SSH in its own tmux session (ssh_tmux).
+# If we're already inside tmux, use TMUX='' to allow nesting; otherwise create normally.
+CMD="cd $WORKDIR && export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH\" && uv run python evolve.py --no-thermal --gens $N_GENS 2>&1 | tee output/run.log"
+
+tmux kill-session -t evo 2>/dev/null || true
+TMUX='' tmux new-session -d -s evo "$CMD"
 
 echo ""
 echo "======================================================"
 echo " Bootstrap complete!"
 echo ""
-echo " Attach:        tmux attach -t evo"
-echo " Follow log:    tail -f $WORKDIR/output/run.log"
-echo " GPU status:    watch -n2 nvidia-smi"
-echo " Progress:      tail -1 $WORKDIR/output/evolution_log.csv"
+echo " Switch to run:  tmux switch -t evo   (if inside vast.ai ssh_tmux)"
+echo " Attach direct:  tmux attach -t evo   (if SSHing fresh)"
+echo " Follow log:     tail -f $WORKDIR/output/run.log"
+echo " GPU status:     watch -n2 nvidia-smi"
+echo " Progress:       tail -1 $WORKDIR/output/evolution_log.csv"
 echo "======================================================"
