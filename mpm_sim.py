@@ -77,7 +77,7 @@ fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
 
 # Circumferential fiber directions for anisotropic actuation (Mat 3)
 fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
-use_anisotropic_actuation = False  # Feature flag; set True before first substep() call to enable
+use_anisotropic_actuation = True   # Inward-normal anisotropic actuation (hoop stress projection)
 
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))

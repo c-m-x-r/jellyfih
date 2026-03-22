@@ -138,9 +138,10 @@ def api_bounds():
 
 def parse_evolution_log(filename='evolution_log.csv'):
     """Parse an evolution log CSV and return list of dicts."""
-    # Sanitize: only allow filenames, no path components
-    filename = Path(filename).name
-    csv_path = OUTPUT_DIR / filename
+    # Allow relative subpaths within OUTPUT_DIR; reject any traversal outside it
+    csv_path = (OUTPUT_DIR / filename).resolve()
+    if not str(csv_path).startswith(str(OUTPUT_DIR.resolve())):
+        return []
     if not csv_path.exists():
         return []
     rows = []
@@ -168,13 +169,13 @@ def parse_evolution_log(filename='evolution_log.csv'):
 @app.route('/api/evolution/logs', methods=['GET'])
 def api_evolution_logs():
     """List available evolution log files."""
-    logs = sorted(OUTPUT_DIR.glob('*evolution_log*.csv'))
+    logs = sorted(OUTPUT_DIR.rglob('*evolution_log*.csv'))
     result = []
     for p in logs:
         # Skip backup copies with spaces in name
         if ' ' in p.name:
             continue
-        result.append(p.name)
+        result.append(str(p.relative_to(OUTPUT_DIR)))
     return jsonify({'logs': result})
 
 

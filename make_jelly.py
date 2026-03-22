@@ -274,12 +274,20 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     offset = np.array(spawn_offset)
 
     if len(all_soft_pos) > 0:
-        bell_center = np.array([0.0, PAYLOAD_HEIGHT / 2.0])  # Local coords
-        relative = all_soft_pos - bell_center
-        dist = np.linalg.norm(relative, axis=1, keepdims=True)
-        dist[dist < 1e-10] = 1.0
-        radial = relative / dist
-        circumferential = np.stack([-radial[:, 1], radial[:, 0]], axis=1)  # 90° CCW
+        # Inward normals: get_normals_2d returns outward (away from axis), so negate.
+        # This represents the 2D projection of 3D circumferential (hoop) muscle tension,
+        # which in the r-z cross-section manifests as inward radial pressure (P = T/r).
+        spine_inward_normals = -normals  # points toward x=0 on the right-half spine
+
+        # Map each particle to nearest spine point using |x| (spine is right-half only)
+        abs_x = np.abs(all_soft_pos[:, 0:1])
+        query_pts = np.hstack([abs_x, all_soft_pos[:, 1:2]])          # (N, 2)
+        diffs = query_pts[:, None, :] - spine_points[None, :, :]       # (N, 50, 2)
+        nearest_idx = np.argmin(np.linalg.norm(diffs, axis=2), axis=1) # (N,)
+        circumferential = spine_inward_normals[nearest_idx].copy()
+
+        # Mirror x-component for left-side particles (their inward direction flips)
+        circumferential[all_soft_pos[:, 0] < 0, 0] *= -1
 
         final_pos.append(all_soft_pos + offset)
         final_mat.append(all_soft_mats)
@@ -391,7 +399,7 @@ if __name__ == "__main__":
         genome = random_genome()
         title = "Random Genome"
 
-    pos, mat, _fiber, self_intersecting = generate_phenotype(genome)
+    pos, mat, fiber, self_intersecting = generate_phenotype(genome)
     print(f"{title}: {genome}")
     print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
     if self_intersecting:
@@ -404,7 +412,20 @@ if __name__ == "__main__":
         if np.any(mask):
             ax.scatter(pos[mask, 0], pos[mask, 1], c=colors[m_id],
                        s=1, label=label, alpha=0.8)
+
+    # Fiber direction quiver on muscle particles (downsampled for readability)
+    muscle_mask = mat == 3
+    if np.any(muscle_mask):
+        mp = pos[muscle_mask]
+        mf = fiber[muscle_mask]
+        step = max(1, len(mp) // 300)  # ~300 arrows regardless of particle count
+        ax.quiver(mp[::step, 0], mp[::step, 1],
+                  mf[::step, 0], mf[::step, 1],
+                  color='white', alpha=0.7, scale=18, width=0.003,
+                  headwidth=3, headlength=4, label='Fiber dir.')
+
     ax.set_aspect('equal')
+    ax.set_facecolor('#111111')
     ax.set_title(title)
     ax.legend()
     plt.tight_layout()
