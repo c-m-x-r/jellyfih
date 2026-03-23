@@ -479,9 +479,9 @@ def run_batch_headless(steps):
             results[i, 1] = initial[i, 1]  # init CoM X
             results[i, 2] = final[i, 0]    # final CoM Y
             results[i, 3] = final[i, 1]    # final CoM X
-            # Check for boundary-stuck payload (ceiling/floor)
-            if final[i, 0] > 0.93 or final[i, 0] < 0.01:
-                results[i, 4] = 0.0  # Invalid: stuck at boundary
+            # Only invalidate if payload sinks to floor (genuine failure)
+            if final[i, 0] < 0.01:
+                results[i, 4] = 0.0  # Invalid: payload lost to floor
             else:
                 results[i, 4] = 1.0  # Valid
         else:

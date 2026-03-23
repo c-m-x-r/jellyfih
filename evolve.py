@@ -2,7 +2,7 @@
 Evolutionary optimization of jellyfish morphologies using CMA-ES.
 
 Evaluates 16 morphologies in parallel on GPU via MPM simulation.
-Fitness: staying power — payload altitude maintenance against negative buoyancy.
+Fitness: efficiency — vertical displacement per unit muscle investment (sqrt-normalised).
 
 The payload is slightly negatively buoyant (2.5x density, 0.44x gravity = 1.1x
 effective weight). Without active swimming, the payload sinks. Fitness rewards
@@ -48,6 +48,8 @@ GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 
 # Fitness constants
 PENALTY_INVALID = 100.0
+MUSCLE_FLOOR = 200        # Below this → degenerate morphology, treated as invalid
+MUSCLE_REFERENCE = 500    # Median expected muscle count; efficiency baseline
 
 # View mode constants
 VIEW_STEPS = 150000      # Sim steps for rendered view (3 actuation cycles at 1Hz, dt=2e-5)
@@ -77,32 +79,27 @@ def render_frame(radius, web_palette=False):
 
 
 def compute_fitness(sim_results, muscle_counts):
-    scores = []
+    raw = []
     for i in range(POPSIZE):
         init_y = sim_results[i, 0]
-        init_x = sim_results[i, 1]
         final_y = sim_results[i, 2]
-        final_x = sim_results[i, 3]
         valid = sim_results[i, 4]
-        
-        if valid == 0:
-            scores.append(PENALTY_INVALID)
+
+        if valid == 0 or muscle_counts[i] < MUSCLE_FLOOR:
+            raw.append(None)
             continue
-            
-        # 1. Pure Vertical Gain (Reward moving UP)
-        displacement = final_y - init_y
-        
-        # 2. Drift Penalty (Linear is often better than quadratic for stability)
-        drift = abs(final_x - init_x)
-        
-        # New Fitness: Move up, don't move side-to-side
-        # If it sinks (negative displacement), this value drops.
-        # We penalize drift heavily (e.g. 1.0m drift cancels 1.0m rise)
-        fitness = displacement 
-        #- (1.0 * drift)
-        
-        scores.append(-fitness) # Minimize negative fitness
-    return scores
+
+        # Cap at ceiling so bouncing doesn't inflate score
+        displacement = min(final_y, 0.93) - init_y
+        muscle_cost = (muscle_counts[i] / MUSCLE_REFERENCE) ** 0.5
+        raw.append(-displacement / muscle_cost)  # CMA-ES minimises
+
+    # Set penalty to just worse than the worst valid individual this generation.
+    # Avoids a massive magnitude gap that distorts CMA-ES covariance updates.
+    valid_scores = [s for s in raw if s is not None]
+    penalty = (max(valid_scores) + 1.0) if valid_scores else PENALTY_INVALID
+
+    return [penalty if s is None else s for s in raw]
 
 
 def load_batch(genomes):
@@ -320,7 +317,7 @@ def evolve(generations):
     csv_writer = csv.writer(csv_file)
     if not csv_exists:
         header = ['generation', 'individual'] + [f'gene_{i}' for i in range(9)] + \
-                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma']
+                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma', 'efficiency']
         csv_writer.writerow(header)
         csv_file.flush()
 
@@ -366,7 +363,9 @@ def evolve(generations):
         best_idx = np.argmin(fitness_values)
         best_fitness = -fitness_values[best_idx]
         best_disp = sim_results[best_idx, 2] - sim_results[best_idx, 0]
-        n_invalid = sum(1 for f in fitness_values if f >= PENALTY_INVALID)
+        n_invalid = sum(1 for f in fitness_values if f > 0)  # positive = penalty
+        valid_scores = [-f for f in fitness_values if f <= 0]
+        avg_fitness = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         n_invalid_total += n_invalid
 
         # Per-individual CSV logging
@@ -375,31 +374,42 @@ def evolve(generations):
             drift = abs(sim_results[ind, 3] - sim_results[ind, 1])
             valid = sim_results[ind, 4]
             final_y = sim_results[ind, 2]
+            mc = muscle_counts[ind]
+            eff = (disp / ((mc / MUSCLE_REFERENCE) ** 0.5)) if (mc >= MUSCLE_FLOOR and valid) else 0.0
             row = [gen, ind] + list(genomes[ind]) + [
                 -fitness_values[ind], final_y, disp, drift,
-                muscle_counts[ind], int(valid), es.sigma
+                mc, int(valid), es.sigma, eff
             ]
             csv_writer.writerow(row)
         csv_file.flush()
+
+        # Covariance diagnostics: eigenvalue spread and top correlations
+        C_arr = np.array(es.sm.C)
+        eigvals = np.linalg.eigvalsh(C_arr)
+        cov_diag = C_arr.diagonal().tolist()
 
         # Best genome per generation
         history.append({
             'generation': gen,
             'genome': genomes[best_idx].tolist(),
             'fitness': float(best_fitness),
+            'avg_fitness': float(avg_fitness),
             'displacement': float(best_disp),
             'sigma': float(es.sigma),
+            'cov_cond': float(eigvals[-1] / max(eigvals[0], 1e-12)),
+            'cov_diag': [round(float(v), 4) for v in cov_diag],
         })
         with open(json_path, 'w') as f:
             json.dump(history, f, indent=2)
 
         # Console output
         best_alt = sim_results[best_idx, 2]
+        cond = float(eigvals[-1] / max(eigvals[0], 1e-12))
         si_str = f" SI: {n_self_intersect}" if n_self_intersect > 0 else ""
-        print(f"Gen {gen:3d} | Best: {best_fitness:+.4f} | "
+        print(f"Gen {gen:3d} | Best: {best_fitness:+.4f} Avg: {avg_fitness:+.4f} | "
               f"Alt: {best_alt:.4f} | "
               f"Disp: {best_disp:+.4f} | "
-              f"Sigma: {es.sigma:.4f} | "
+              f"Sigma: {es.sigma:.4f} | Cond: {cond:.1f} | "
               f"Invalid: {n_invalid}/{POPSIZE}{si_str} | "
               f"Load: {t_load:.1f}s Sim: {t_sim:.1f}s")
 

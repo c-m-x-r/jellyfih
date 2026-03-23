@@ -65,7 +65,23 @@ cd "$PROJECT_DIR"
 info "Installing Python dependencies (this may take a few minutes)..."
 uv sync --extra all
 
-# ── 6. Verify Taichi + CUDA ───────────────────────────────────────────────────
+# ── 6. Fix libcuda.so symlink (Taichi looks for unversioned name) ─────────────
+# Vast.ai images expose libcuda.so.1 but not the bare libcuda.so Taichi needs
+LIBCUDA_PATH=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/{print $NF}' | head -1)
+if [[ -n "$LIBCUDA_PATH" ]]; then
+    LIBCUDA_DIR=$(dirname "$LIBCUDA_PATH")
+    if [[ ! -f "$LIBCUDA_DIR/libcuda.so" ]]; then
+        ln -sf "$LIBCUDA_PATH" "$LIBCUDA_DIR/libcuda.so"
+        ldconfig
+        info "Created libcuda.so symlink → $LIBCUDA_PATH"
+    else
+        info "libcuda.so already present."
+    fi
+else
+    warn "libcuda.so.1 not found via ldconfig — Taichi may fall back to CPU."
+fi
+
+# ── 7. Verify Taichi + CUDA ───────────────────────────────────────────────────
 info "Verifying Taichi CUDA backend..."
 # Must write to a real file — Taichi's kernel introspection can't parse stdin/heredoc
 cat > /tmp/taichi_check.py <<'PYEOF'
@@ -81,9 +97,9 @@ test()
 print("Taichi version:", ti.__version__)
 PYEOF
 uv run python /tmp/taichi_check.py
-info "Taichi CUDA verified."
+[[ $? -eq 0 ]] && info "Taichi CUDA verified." || error "Taichi CUDA failed — check libcuda.so symlink."
 
-# ── 7. Output directory ───────────────────────────────────────────────────────
+# ── 8. Output directory ───────────────────────────────────────────────────────
 mkdir -p "$PROJECT_DIR/output"
 info "Output directory ready: $PROJECT_DIR/output"
 
