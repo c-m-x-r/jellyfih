@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05
-DEFAULT_SPAWN = np.array([0.5, 0.7])
+DEFAULT_SPAWN = np.array([0.5, 0.4])  # Lowered from 0.7 to give 0.53 headroom before ceiling
 
 # Aurelia aurita (moon jelly) reference genome:
 # Wide, shallow bell with moderate thickness — biomimetic baseline.

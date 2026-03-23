@@ -43,7 +43,12 @@ gravity = 10.0
 
 # Actuation (Pulsed Active Stress)
 actuation_freq = 1  # Hz
-actuation_strength = 10000.0 
+actuation_strength = 500.0
+
+# Actuation waveform phases (fraction of cycle)
+ACT_CONTRACTION_END = 0.2   # 20% contraction (raised cosine ramp up)
+ACT_RELAXATION_END  = 0.6   # 40% relaxation  (raised cosine ramp down)
+                             # 40% refractory  (zero activation, bell settles)
 
 # Rendering
 video_res = 1024
@@ -71,10 +76,15 @@ fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
 # Per-particle fiber direction for tangent-aligned muscle actuation
 fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 
+# Per-instance actuation strength (allows different strengths per instance for tuning)
+# Defaults to actuation_strength; override per-instance for parameter sweeps
+instance_actuation = ti.field(dtype=float, shape=(n_instances,))
+
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
 for _i in range(n_instances):
     instance_hue[_i] = 0.55
+    instance_actuation[_i] = actuation_strength
 
 # --- PHYSICS KERNELS ---
 
@@ -87,11 +97,14 @@ def substep():
     phase = (current_time % period) / period
     
     # Raised cosine waveform: 20% contraction, 80% relaxation (bio-inspired asymmetry)
+    # Waveform: contraction → relaxation → refractory (bell settles before next stroke)
     activation = 0.0
-    if phase < 0.2:
-        activation = 0.5 * (1.0 - ti.cos(phase / 0.2 * 3.14159265))
-    elif phase < 1.0:
-        activation = 0.5 * (1.0 + ti.cos((phase - 0.2) / 0.8 * 3.14159265))
+    if phase < ACT_CONTRACTION_END:
+        activation = 0.5 * (1.0 - ti.cos(phase / ACT_CONTRACTION_END * 3.14159265))
+    elif phase < ACT_RELAXATION_END:
+        rel_phase = (phase - ACT_CONTRACTION_END) / (ACT_RELAXATION_END - ACT_CONTRACTION_END)
+        activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
+    # else: refractory period — activation stays 0
 
 
     # 1. Reset Grid
@@ -154,7 +167,7 @@ def substep():
         
         # Active Muscle Stress (tangent-aligned: contracts along bell wall, not isotropically)
         if material[m, p] == 3:
-            contractile_pressure = actuation_strength * activation
+            contractile_pressure = instance_actuation[m] * activation
             fd = fiber_dir[m, p]
             stress += fd.outer_product(fd) * contractile_pressure * J
 
@@ -277,11 +290,14 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     # Re-calculate Pulse for visual sync in the renderer
     period = 1.0 / actuation_freq
     phase = (sim_time[None] % period) / period
+    # Waveform: contraction → relaxation → refractory (bell settles before next stroke)
     activation = 0.0
-    if phase < 0.2:
-        activation = 0.5 * (1.0 - ti.cos(phase / 0.2 * 3.14159265))
-    elif phase < 1.0:
-        activation = 0.5 * (1.0 + ti.cos((phase - 0.2) / 0.8 * 3.14159265))
+    if phase < ACT_CONTRACTION_END:
+        activation = 0.5 * (1.0 - ti.cos(phase / ACT_CONTRACTION_END * 3.14159265))
+    elif phase < ACT_RELAXATION_END:
+        rel_phase = (phase - ACT_CONTRACTION_END) / (ACT_RELAXATION_END - ACT_CONTRACTION_END)
+        activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
+    # else: refractory period — activation stays 0
     
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 

@@ -8,7 +8,7 @@ Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES an
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Actuation | Raised cosine pulse | 20/80 asymmetry, isotropic pressure on muscle (Mat 3) |
+| Actuation | Raised cosine pulse | 20% contraction / 40% relaxation / 40% refractory, tangent-aligned (Mat 3), strength=500 |
 | Fitness | Vertical displacement | final_y - init_y (drift penalty currently commented out) |
 | Resolution | 128x128 grid, 80K particles | quality=1, single phase for now |
 | Payload | 0.08 x 0.05 normalized units | Material 2, 2.5x density, 0.44x gravity (slightly neg. buoyant) |
@@ -16,7 +16,7 @@ Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES an
 | CMA-ES | lambda=16, sigma=0.1, 50 gens | Population matches GPU batch size |
 | Sim Duration | 3 actuation cycles (60K steps) | Per fitness evaluation |
 | Frequency | 1.0 Hz | Biological mid-range |
-| Spawn | [0.5, 0.7] | Centered, 70% up from bottom |
+| Spawn | [0.5, 0.4] | Centered, 40% up from bottom (lowered to give 0.53 headroom before ceiling at 0.93) |
 
 ## Architecture
 
