@@ -30,10 +30,14 @@ nu_jelly = 0.3
 mu_jelly = E_jelly / (2 * (1 + nu_jelly))
 lambda_jelly = E_jelly * nu_jelly / ((1 + nu_jelly) * (1 - 2 * nu_jelly))
 
-# Payload Properties (Heavy & Stiff)
-# Reduced E from 2e5 to 4e4 to satisfy CFL: c = sqrt(E/rho)
-# We will compensate by increasing density (rho) in the kernel
-E_payload = 4.0e4 
+# Payload Properties
+# CFL check: dt * c_p / dx < 1, where c_p = sqrt((lambda+2mu)/rho)
+# With E=2e5, nu=0.2, density_mult=2.5: c_p ≈ 298, dt*c_p/dx ≈ 0.76  ✓
+# Higher density_mult lowers c_p, giving more headroom (heavier = safer CFL).
+# Physical scale: 1 normalized unit ≈ 48 cm (Aurelia ~25 cm bell).
+# Density mapping (water = 1.0 ≡ 1000 kg/m³):
+#   1.9 = PCB/FR4,  2.5 = LiPo battery,  2.7 = aluminium,  7.8 = steel
+E_payload = 2.0e5
 nu_payload = 0.2
 mu_payload = E_payload / (2 * (1 + nu_payload))
 lambda_payload = E_payload * nu_payload / ((1 + nu_payload) * (1 - 2 * nu_payload))
@@ -49,6 +53,23 @@ actuation_strength = 500.0
 ACT_CONTRACTION_END = 0.2   # 20% contraction (raised cosine ramp up)
 ACT_RELAXATION_END  = 0.6   # 40% relaxation  (raised cosine ramp down)
                              # 40% refractory  (zero activation, bell settles)
+
+# --- RENDERING PALETTES ---
+# Three rendering modes are supported:
+#   'abyss':  Dark background, HDR accumulation with Reinhard tone mapping.
+#             Water particles are velocity-direction colourised (flow & vortex streets visible).
+#             instance_hue controls jelly hue; instance_muscle_hue controls muscle hue.
+#             Optional vorticity overlay: call render_vorticity_overlay() before tone_map_and_encode().
+#   'web':    White background, flat material colours matching the web UI frontend.
+#             Use clear_frame_buffer_white() + render_flat_pass() per material in WEB_PALETTE.
+#   'custom': Like abyss, but with manually set instance_hue[m] / instance_muscle_hue[m] per instance.
+#             For two contrasting colours set e.g. hue1 and (hue1 + 0.5) % 1.0 (complementary pair).
+WEB_PALETTE = [
+    (0, 0.933, 0.949, 0.957),   # Water:   rgb(238, 242, 244) — light blue-gray
+    (1, 0.678, 0.882, 0.875),   # Jelly:   rgb(173, 225, 223) — teal
+    (3, 0.976, 0.757, 0.765),   # Muscle:  rgb(249, 193, 195) — coral
+    (2, 0.961, 0.824, 0.576),   # Payload: rgb(245, 210, 147) — orange
+]
 
 # Rendering
 video_res = 1024
@@ -82,9 +103,17 @@ instance_actuation = ti.field(dtype=float, shape=(n_instances,))
 
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
+# Per-instance muscle hue (default offset by 0.15 from jelly hue for contrast)
+instance_muscle_hue = ti.field(dtype=float, shape=(n_instances,))
+# Per-instance payload density multiplier relative to water (1.0 ≡ 1000 kg/m³).
+# Default 2.5 ≈ LiPo battery / mixed electronics assembly.
+# CFL remains satisfied up to ~10× water at E=2e5.
+instance_payload_density = ti.field(dtype=float, shape=(n_instances,))
 for _i in range(n_instances):
     instance_hue[_i] = 0.55
+    instance_muscle_hue[_i] = (0.55 + 0.15) % 1.0
     instance_actuation[_i] = actuation_strength
+    instance_payload_density[_i] = 2.5
 
 # --- PHYSICS KERNELS ---
 
@@ -131,12 +160,9 @@ def substep():
         if material[m, p] == 1 or material[m, p] == 3:  # Jelly or Muscle
             mu, la = mu_jelly, lambda_jelly
         
-        elif material[m, p] == 2:  # Payload (Heavy Rigid Body)
+        elif material[m, p] == 2:  # Payload
             mu, la = mu_payload, lambda_payload
-            # CRITICAL FIX: Increase density 4x. 
-            # This lowers sound speed c = sqrt(E/rho) to prevent CFL explosion
-            # while keeping the payload heavy (inertial resistance).
-            current_mass *= 2.5
+            current_mass *= instance_payload_density[m]
             
         elif material[m, p] == 0:  # Water
             mu, la = 0.0, water_lambda
@@ -193,11 +219,13 @@ def substep():
             # Bleeds off excess energy from numerical errors (1% drag)
             #grid_v[m, i, j] *= 0.99998
             
-            # Boundary Damping
+            # Boundary Damping (all four sides)
             damp_cells = n_grid // 20
             damp = 1.0
             if i < damp_cells: damp *= 0.95 + 0.05 * i / damp_cells
             if i > n_grid - damp_cells: damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells
+            if j < damp_cells: damp *= 0.95 + 0.05 * j / damp_cells
+            if j > n_grid - damp_cells: damp *= 0.95 + 0.05 * (n_grid - j) / damp_cells
             grid_v[m, i, j] *= damp
 
             # Wall Collisions
@@ -224,10 +252,7 @@ def substep():
                 new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             v[m, p], C[m, p] = new_v, new_C
 
-        if material[m, p] != 2:
-            v[m, p][1] -= dt * gravity
-        else:
-            v[m, p][1] -= dt * gravity * 0.8
+        v[m, p][1] -= dt * gravity  # uniform gravity for all active particles
         x[m, p] += dt * v[m, p]
         
         for d in ti.static(range(2)):
@@ -317,10 +342,15 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         norm_x = float(col_idx) / grid_norm_factor
         norm_y = float(row_idx) / grid_norm_factor
 
-        if mat == 0: # WATER
-            if vel > 0.5:
-                color = ti.Vector([0.1, 0.2, 0.8])
-                intensity = 0.015 * (vel / 10.0)
+        if mat == 0: # WATER — velocity-direction colourised for flow/vortex visibility
+            if vel > 0.02:
+                vx_n = v[m, p][0]
+                vy_n = v[m, p][1]
+                flow_angle = ti.atan2(vy_n, vx_n)
+                hue = (flow_angle / (2.0 * 3.14159265) + 0.5) % 1.0
+                brightness = ti.min(vel / 2.0, 1.0)
+                color = hsv2rgb(hue, 0.8, brightness)
+                intensity = 0.025 + 0.075 * brightness
 
         elif mat == 1: # JELLY
             hue = instance_hue[m]
@@ -330,8 +360,8 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
             color = base_col + ti.Vector([glow, glow, glow])
             intensity = 0.05 + (glow * 0.2)
 
-        elif mat == 3: # MUSCLE (Visually syncs with activation)
-            hue = instance_hue[m]
+        elif mat == 3: # MUSCLE (Visually syncs with activation; uses separate muscle hue)
+            hue = instance_muscle_hue[m]
             color = hsv2rgb(hue, 0.2, 1.0) + ti.Vector([activation, activation, activation])
             intensity = 0.4 + (activation * 0.4)
             
@@ -398,6 +428,47 @@ def render_flat_pass(p_res_sub: int, p_grid_side: int, radius: float,
                         frame_buffer[py, px, 0] = cr
                         frame_buffer[py, px, 1] = cg
                         frame_buffer[py, px, 2] = cb
+
+
+@ti.kernel
+def render_vorticity_overlay(p_res_sub: int, p_grid_side: int, vort_scale: float):
+    """
+    Grid-based 2D vorticity overlay. Computes curl(v) = dvx/dy - dvy/dx per cell
+    and paints coloured squares additively onto frame_buffer.
+
+    Call AFTER render_frame_abyss() but BEFORE tone_map_and_encode().
+    Warm colours (orange/red) = CCW rotation; cool colours (blue) = CW rotation.
+
+    vort_scale: sensitivity multiplier. Recommended starting values:
+        0.001  — strong pulses (actuation_strength >= 500)
+        0.003  — weak pulses or early-generation morphologies
+    """
+    for m, i, j in grid_v:
+        if i < 1 or i >= n_grid - 1 or j < 1 or j >= n_grid - 1:
+            continue
+        if grid_m[m, i, j] <= 0.0:
+            continue
+        # Finite-difference curl on the MPM grid
+        dvx_dy = (grid_v[m, i, j + 1][0] - grid_v[m, i, j - 1][0]) / (2.0 * dx)
+        dvy_dx = (grid_v[m, i + 1, j][1] - grid_v[m, i - 1, j][1]) / (2.0 * dx)
+        curl = dvx_dy - dvy_dx
+        vort_intensity = ti.min(ti.abs(curl) * vort_scale, 1.0)
+        if vort_intensity < 0.01:
+            continue
+        if curl > 0:
+            col = ti.Vector([1.0, 0.4, 0.0]) * vort_intensity   # warm: CCW
+        else:
+            col = ti.Vector([0.0, 0.4, 1.0]) * vort_intensity   # cool: CW
+        row, c = m // p_grid_side, m % p_grid_side
+        cell_x = int((float(i) / n_grid + c) * p_res_sub)
+        cell_y = int(((1.0 - float(j) / n_grid) + row) * p_res_sub)
+        cell_px = ti.max(1, p_res_sub // n_grid)
+        for px in range(cell_x - cell_px // 2, cell_x + cell_px // 2 + 1):
+            for py in range(cell_y - cell_px // 2, cell_y + cell_px // 2 + 1):
+                if 0 <= px < video_res and 0 <= py < video_res:
+                    frame_buffer[py, px, 0] += col[0] * 0.5
+                    frame_buffer[py, px, 1] += col[1] * 0.5
+                    frame_buffer[py, px, 2] += col[2] * 0.5
 
 
 @ti.kernel

@@ -56,14 +56,7 @@ VIEW_STEPS = 150000      # Sim steps for rendered view (3 actuation cycles at 1H
 VIEW_RENDER_EVERY = 500  # Render a frame every N substeps (~same sim-time per frame as before)
 VIEW_FPS = 30
 
-# Web palette: material colors matching the web frontend (#E8F4F8, #4ECDC4, #FF6B6B, #FFA500)
-# Rendered in layer order: water first (back), payload last (front)
-WEB_PALETTE = [
-    (0, 0.933, 0.949, 0.957),  # Water:   rgb(238, 242, 244)
-    (1, 0.678, 0.882, 0.875),  # Jelly:   rgb(173, 225, 223)
-    (3, 0.976, 0.757, 0.765),  # Muscle:  rgb(249, 193, 195)
-    (2, 0.961, 0.824, 0.576),  # Payload: rgb(245, 210, 147)
-]
+from mpm_sim import WEB_PALETTE  # centralised in mpm_sim.py
 
 
 def render_frame(radius, web_palette=False):
@@ -124,26 +117,91 @@ def load_batch(genomes):
 
 def run_baseline():
     """
-    Run zero-actuation baseline: use a default genome, check that passive
-    morphologies don't achieve significant upward displacement.
+    Zero-actuation baseline: load the centre genome with actuation disabled.
+    Checks that a passive jellyfish body doesn't drift significantly.
     """
-    print("Running zero-actuation baseline check...")
+    print("Running zero-actuation baseline (centre genome, actuation=0)...")
 
     genome = GENOME_X0
     genomes = [genome] * POPSIZE
-    muscle_counts, _ = load_batch(genomes)
+    load_batch(genomes)
 
-    # Run a shorter sim for baseline (1 cycle)
+    # Disable actuation for all instances
+    saved = [sim.instance_actuation[m] for m in range(POPSIZE)]
+    for m in range(POPSIZE):
+        sim.instance_actuation[m] = 0.0
+
     results = sim.run_batch_headless(20000)
 
-    displacement = results[0, 2] - results[0, 0]
-    print(f"  Baseline displacement: {displacement:.4f}")
-    if abs(displacement) > 0.05:
-        print(f"  WARNING: Passive displacement is {displacement:.4f}. "
-              f"This may indicate buoyancy/gravity artifacts dominating fitness.")
-    else:
-        print(f"  OK: Passive displacement is small ({displacement:.4f})")
+    # Restore actuation
+    for m in range(POPSIZE):
+        sim.instance_actuation[m] = saved[m]
 
+    displacement = results[0, 2] - results[0, 0]
+    if abs(displacement) > 0.05:
+        print(f"  WARNING: Passive body drifted {displacement:+.4f} with zero actuation "
+              f"— gravity/buoyancy artefact?")
+    else:
+        print(f"  OK: Zero-actuation drift = {displacement:+.4f}")
+    return displacement
+
+
+def run_payload_sink_baseline():
+    """
+    Payload-only baseline: no jellyfish, just payload + water.
+    Verifies the payload genuinely sinks under gravity before evolution starts.
+    Runs all instances (substep is batch) but only inspects instance 0.
+    """
+    from scipy.spatial import cKDTree as _cKDTree
+    from make_jelly import PAYLOAD_WIDTH, PAYLOAD_HEIGHT, DEFAULT_SPAWN
+
+    print("Running payload-sink baseline (no jellyfish, centered at 0.5)...")
+
+    spacing = 1.0 / (sim.n_grid * 2.0)
+    margin = spacing * 3
+    raster_res = sim.n_grid * 2
+
+    # Drop payload at the true centre of the domain so buoyancy/gravity are clear
+    center_spawn = np.array([0.5, 0.5])
+
+    px = np.linspace(-PAYLOAD_WIDTH / 2, PAYLOAD_WIDTH / 2,
+                     int(PAYLOAD_WIDTH * raster_res))
+    py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT * raster_res))
+    pgx, pgy = np.meshgrid(px, py)
+    payload_pos = np.vstack([pgx.ravel(), pgy.ravel()]).T + center_spawn
+    n_payload = len(payload_pos)
+
+    wx = np.arange(margin, 1.0 - margin, spacing)
+    wy = np.arange(margin, 1.0 - margin, spacing)
+    wgx, wgy = np.meshgrid(wx, wy)
+    water_candidates = np.vstack([wgx.ravel(), wgy.ravel()]).T
+    dists, _ = _cKDTree(payload_pos).query(water_candidates, k=1)
+    water_pos = water_candidates[dists > 0.005]
+    n_water = min(len(water_pos), sim.n_particles - n_payload)
+
+    positions = np.full((sim.n_particles, 2), -1.0, dtype=np.float32)
+    materials = np.full(sim.n_particles, -1, dtype=np.int32)
+    fibers = np.zeros((sim.n_particles, 2), dtype=np.float32)
+    fibers[:, 1] = 1.0
+    positions[:n_payload] = payload_pos
+    materials[:n_payload] = 2
+    positions[n_payload:n_payload + n_water] = water_pos[:n_water]
+    materials[n_payload:n_payload + n_water] = 0
+
+    for m in range(POPSIZE):
+        sim.load_particles(m, positions, materials, fibers)
+    ti.sync()
+
+    results = sim.run_batch_headless(20000)
+    displacement = results[0, 2] - results[0, 0]
+
+    if displacement > 0.005:
+        print(f"  WARNING: Payload ROSE {displacement:+.4f} without jellyfish — "
+              f"check gravity/density settings.")
+    elif displacement < -0.005:
+        print(f"  OK: Payload sank {abs(displacement):.4f} as expected.")
+    else:
+        print(f"  NOTE: Payload barely moved ({displacement:+.4f}) — nearly neutral.")
     return displacement
 
 
@@ -200,41 +258,61 @@ def view_best(gen_idx=None, web_palette=False):
 
     # Pick 4 generations for the 4 rows
     if gen_idx is not None:
-        # Single generation: fill all 4 rows with the same genome
-        entry = None
-        for h in history:
-            if h['generation'] == gen_idx:
-                entry = h
-                break
-        if entry is None:
-            print(f"Generation {gen_idx} not found in history.")
-            return
-        row_entries = [entry] * grid_side
+        # Load all individuals from the full CSV log for this generation.
+        # Each GPU instance shows a different individual (sorted by fitness).
+        # Falls back to best_genomes.json single entry if no CSV is found.
+        csv_path = os.path.join(OUTPUT_DIR, "evolution_log.csv")
+        run_id = os.path.basename(os.path.abspath(OUTPUT_DIR))
+        alt_csv = os.path.join(OUTPUT_DIR, f"evolution_log_{run_id}.csv")
+        if not os.path.exists(csv_path) and os.path.exists(alt_csv):
+            csv_path = alt_csv
+
+        use_genomes = []
+        sorted_ind = []
+        if os.path.exists(csv_path):
+            individuals = load_generation_from_csv(csv_path, gen_idx)
+            sorted_ind = sorted(individuals, key=lambda r: r['fitness'], reverse=True)
+            use_genomes = [np.array(r['genome']) for r in sorted_ind[:POPSIZE]]
+
+        if not use_genomes:
+            # Fallback: single best genome from best_genomes.json
+            entry = next((h for h in history if h['generation'] == gen_idx), None)
+            if entry is None:
+                print(f"Generation {gen_idx} not found in history or CSV.")
+                return
+            use_genomes = [np.array(entry['genome'])]
+
+        # Pad to POPSIZE with last entry
+        while len(use_genomes) < POPSIZE:
+            use_genomes.append(use_genomes[-1])
+        genomes = use_genomes
         label = f"gen_{gen_idx}"
-        print(f"Viewing best genome from generation {gen_idx} "
-              f"(fitness: {entry['fitness']:.4f})")
+        n_unique = min(len(sorted_ind), POPSIZE) if sorted_ind else 1
+        fitness_str = (f"fitness range: {sorted_ind[0]['fitness']:.4f} → "
+                       f"{sorted_ind[min(n_unique-1, len(sorted_ind)-1)]['fitness']:.4f}"
+                       if sorted_ind else "from best_genomes.json")
+        print(f"Viewing generation {gen_idx}: {n_unique} distinct individuals ({fitness_str})")
+        print(f"  Layout: each cell = different individual, ranked by fitness")
     else:
-        # Pick up to 4 evenly spaced generations
+        # Pick up to 4 evenly spaced generations; each row = one generation's best
         n_avail = len(history)
         if n_avail >= grid_side:
             indices = np.linspace(0, n_avail - 1, grid_side, dtype=int)
         else:
             indices = list(range(n_avail))
         row_entries = [history[i] for i in indices]
-        # Pad with last entry if fewer than 4 generations
         while len(row_entries) < grid_side:
             row_entries.append(row_entries[-1])
         label = "progression"
         print(f"Viewing progression: rows = gen "
               + ", ".join(str(e['generation']) for e in row_entries))
+        print(f"  Columns: lime | green | turquoise | cyan")
 
-    print(f"  Columns: lime | green | turquoise | cyan")
-
-    # Build the 16-instance genome list: row=generation, col=color variant
-    genomes = []
-    for row in range(grid_side):
-        for col in range(grid_side):
-            genomes.append(row_entries[row]['genome'])
+        # Build the 16-instance genome list: row=generation, col=color variant
+        genomes = []
+        for row in range(grid_side):
+            for col in range(grid_side):
+                genomes.append(row_entries[row]['genome'])
 
     # Set per-instance hues by column (only used for abyss palette)
     if not web_palette:
@@ -280,7 +358,7 @@ def view_best(gen_idx=None, web_palette=False):
     print(f"Done! {len(frames)} frames written to {video_path}")
 
 
-def evolve(generations):
+def evolve(generations, seed=42):
     """Run the evolutionary loop."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     run_id = os.path.basename(os.path.abspath(OUTPUT_DIR))
@@ -294,8 +372,9 @@ def evolve(generations):
         es, start_gen, history = resumed
         start_gen += 1  # Continue from next generation
     else:
-        # Run baseline check first
-        run_baseline()
+        # Sanity checks before evolution starts
+        run_payload_sink_baseline()  # payload sinks without jellyfish
+        run_baseline()               # passive body doesn't drift with zero actuation
 
         # Initialize CMA-ES with built-in bounds handling
         # CMA_stds normalizes the search space so mutations are proportional
@@ -304,7 +383,7 @@ def evolve(generations):
         opts = {
             'popsize': POPSIZE,
             'bounds': [GENOME_LOWER, GENOME_UPPER],
-            'seed': 42,
+            'seed': seed,
             'maxiter': generations,
             'CMA_stds': gene_ranges,
         }
@@ -641,6 +720,8 @@ def main():
                         help="Number of frames to render (use with --sim-gen, default: 100)")
     parser.add_argument('--run-id', type=str, default=None,
                         help="Run identifier for output directory (default: auto timestamp YYYYMMDD_HHMMSS)")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="CMA-ES random seed (default: 42; use different values for independent replicate runs)")
     parser.add_argument('--instances', type=int, default=16,
                         help="Number of parallel GPU instances / CMA-ES population size (default: 16)")
     args = parser.parse_args()
@@ -662,7 +743,7 @@ def main():
     elif args.view:
         view_best(gen_idx=args.gen, web_palette=args.web_palette)
     else:
-        evolve(args.gens)
+        evolve(args.gens, seed=args.seed)
 
 
 if __name__ == "__main__":

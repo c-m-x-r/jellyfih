@@ -11,12 +11,12 @@ Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES an
 | Actuation | Raised cosine pulse | 20% contraction / 40% relaxation / 40% refractory, tangent-aligned (Mat 3), strength=500 |
 | Fitness | Efficiency metric | displacement / sqrt(muscle_count / 500); muscle floor ≥200; dynamic invalid penalty |
 | Resolution | 128x128 grid, 80K particles | quality=1, single phase for now |
-| Payload | 0.08 x 0.05 normalized units | Material 2, 2.5x density, 0.44x gravity (slightly neg. buoyant) |
+| Payload | 0.08 x 0.05 normalized units | Material 2, density via `instance_payload_density` (default 2.5×), full gravity |
 | Boundaries | Damped sides, clamped top/bottom | n_grid/20 damping layer width |
 | CMA-ES | lambda=16, sigma=0.1, 50 gens | Population matches GPU batch size |
 | Sim Duration | 3 actuation cycles (60K steps) | Per fitness evaluation |
 | Frequency | 1.0 Hz | Biological mid-range |
-| Spawn | [0.5, 0.4] | Centered, 40% up from bottom (lowered to give 0.53 headroom before ceiling at 0.93) |
+| Spawn | [0.5, 0.55] | Vertically centred; deepest bell tip (end_y=-0.45) reaches y≈0.10, safely above floor |
 
 ## Architecture
 
@@ -73,7 +73,7 @@ GPU-side: `compute_payload_stats()` kernel averages all Material 2 particle posi
 |----|----------|------------|------|
 | 0 | Water | Fluid, mu=0, lambda=100000 | Background medium |
 | 1 | Jelly | Hyperelastic, E=0.7e3, nu=0.3 | Passive bell structure |
-| 2 | Payload | Near-rigid, E=4e4, 2.5x density, 0.44x gravity | Instrumented cargo (slightly neg. buoyant) |
+| 2 | Payload | Near-rigid, E=2e5, density=`instance_payload_density` (default 2.5×), full gravity | Instrumented cargo; density is per-instance configurable (2.5 ≈ LiPo/PCB) |
 | 3 | Muscle | Same elasticity as jelly + active stress | Actuation tissue |
 | -1 | Dead | Skipped in all kernels | Padding to fixed count |
 
@@ -119,7 +119,7 @@ uv run python evolve.py --gens 50
 # Render best genomes as 4x4 video (rows=generations, columns=color-coded)
 uv run python evolve.py --view
 
-# Render specific generation
+# Render all individuals from a specific generation (each cell = different individual)
 uv run python evolve.py --view --gen 3
 
 # Evaluate Aurelia aurita reference genome (baseline comparison)
@@ -127,7 +127,8 @@ uv run python evolve.py --aurelia
 
 # Test morphology generator (matplotlib plot)
 uv run python make_jelly.py
-uv run python make_jelly.py --aurelia  # Moon jelly reference
+uv run python make_jelly.py --aurelia             # Moon jelly reference
+uv run python make_jelly.py --aurelia --no-payload  # Payloadless (symmetry test)
 
 # Fluid dynamics test visualization
 uv run python helpers/fluid_test.py
@@ -145,6 +146,22 @@ uv run python helpers/make_comparison.py
 
 # Actuation strength sweep across GPU batch
 uv run python tune_actuation.py
+
+# Quick single-genome preview — 1 instance = full 1024x1024 view (~4-5s)
+uv run python helpers/view_single.py --aurelia                   # Aurelia reference, full-res
+uv run python helpers/view_single.py --gen 5                     # Best from gen 5
+uv run python helpers/view_single.py --aurelia --flow            # With vorticity overlay
+uv run python helpers/view_single.py --aurelia --palette web     # Web palette
+uv run python helpers/view_single.py --aurelia --palette random  # Two contrasting colours
+uv run python helpers/view_single.py --aurelia --no-payload      # Payloadless symmetry
+uv run python helpers/view_single.py --gen 3 --instances 16     # 4x4 colour-variant grid
+
+# View all individuals from a generation (each GPU instance = different individual)
+# Handles any generation size; shows top N by fitness with clear count messaging
+uv run python helpers/view_generation.py --gen 5
+uv run python helpers/view_generation.py --gen 5 --include-invalid
+uv run python helpers/view_generation.py --gen 5 --palette random  # per-cell random colours
+uv run python helpers/view_generation.py --gen 5 --palette web
 
 # Web viewer (morphology explorer + evolutionary history + interactive designer)
 cd web && python app.py   # http://localhost:5000
@@ -168,6 +185,8 @@ cd web && python app.py   # http://localhost:5000
 | helpers/make_cad.py | CAD export: genome → STL (extruded cross-section + revolved solid) |
 | helpers/make_comparison.py | Side-by-side comparison video: Aurelia vs Gen 0 vs Gen N |
 | helpers/payload_sink.py | Baseline demo: payload sinking without jellyfish (buoyancy check) |
+| helpers/view_single.py | Quick single-genome render (~4.5s); `--aurelia`, `--gen N`, `--flow`, `--no-payload` |
+| helpers/view_generation.py | View all individuals from one generation; each GPU instance = different morphology |
 
 ## Output Files
 
@@ -194,7 +213,7 @@ Benchmarked on a single CUDA GPU (quality=1, 128x128 grid, 80K particles, 16 ins
 
 ## Known Issues / TODO
 
-1. **Gravity hack**: Payload uses 0.44x gravity to approximate slight negative buoyancy (needs calibration justification for paper)
+1. **No buoyancy model**: MPM has no hydrostatic buoyancy. Payload uses full gravity (2.5x density) and sinks; jellyfish must generate active thrust to lift it.
 2. **Mirror overlap**: Particles at x=0 duplicated by symmetry mirroring (density spike at midline)
 3. **No adaptive resolution**: Phase 1/2 transition (128->256 grid) not implemented
 4. **No genome heatmap**: Post-evolution gene importance visualization not implemented

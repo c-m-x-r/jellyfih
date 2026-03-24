@@ -477,6 +477,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },
+    { name = "imageio", extra = ["ffmpeg"] },
     { name = "mapbox-earcut" },
     { name = "matplotlib" },
     { name = "moviepy" },
@@ -492,42 +493,31 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-all = [
-    { name = "cma" },
-    { name = "imageio", extra = ["ffmpeg"] },
-    { name = "opencv-python" },
-    { name = "taichi" },
-]
 simulation = [
     { name = "cma" },
-    { name = "imageio", extra = ["ffmpeg"] },
     { name = "opencv-python" },
     { name = "taichi" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "cma", marker = "extra == 'all'", specifier = ">=4.0.0" },
     { name = "cma", marker = "extra == 'simulation'", specifier = ">=4.0.0" },
     { name = "flask", specifier = ">=3.0.0" },
-    { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'all'", specifier = ">=2.37.2" },
-    { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'simulation'", specifier = ">=2.37.2" },
+    { name = "imageio", extras = ["ffmpeg"], specifier = ">=2.37.2" },
     { name = "mapbox-earcut", specifier = ">=2.0.0" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "moviepy", specifier = ">=2.2.1" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "opencv-python", marker = "extra == 'all'", specifier = ">=4.13.0.92" },
     { name = "opencv-python", marker = "extra == 'simulation'", specifier = ">=4.13.0.92" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pymeshlab", specifier = ">=2025.7.post1" },
     { name = "scipy", specifier = ">=1.10.0" },
     { name = "shapely", specifier = ">=2.0.0" },
-    { name = "taichi", marker = "extra == 'all'", specifier = ">=1.7.0" },
     { name = "taichi", marker = "extra == 'simulation'", specifier = ">=1.7.0" },
     { name = "trimesh", specifier = ">=4.0.0" },
     { name = "vastai", specifier = ">=0.2.8" },
 ]
-provides-extras = ["simulation", "all"]
+provides-extras = ["simulation"]
 
 [[package]]
 name = "jinja2"

@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05
-DEFAULT_SPAWN = np.array([0.5, 0.2])  # Low spawn: 0.73 headroom before ceiling at 0.93
+DEFAULT_SPAWN = np.array([0.5, 0.55])  # Centred vertically; deepest bell tip (end_y=-0.45) reaches y≈0.10
 
 # Aurelia aurita (moon jelly) reference genome:
 # Wide, shallow bell with moderate thickness — biomimetic baseline.
@@ -66,7 +66,7 @@ def get_normals_2d(points):
     norm = np.linalg.norm(normals, axis=1, keepdims=True)
     norm[norm == 0] = 1
     return normals / norm
-def generate_phenotype(genome, spawn_offset=None, grid_res=128):
+def generate_phenotype(genome, spawn_offset=None, grid_res=128, with_payload=True):
     """
     Converts a CMA-ES genome vector into particle positions and materials.
     Includes a 'Mesoglea Collar' and 'Transverse Bridge' to unify the body.
@@ -163,11 +163,15 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     n_collar_pts = 20
     collar_t_vals = np.linspace(0, 1, n_collar_pts)
 
-    # Inner edge: straight along payload side
-    collar_inner_edge = np.column_stack([
-        np.full(n_collar_pts, PAYLOAD_WIDTH / 2.0),
-        np.linspace(collar_top_y, 0, n_collar_pts)
-    ])
+    # Inner edge: Bezier curving from payload side down to inner_curve[0]
+    # This ensures the collar mates precisely with the bell wall inner surface,
+    # eliminating the previous mismatch where the straight line ended at y=0
+    # while inner_curve[0] is displaced below that point.
+    ci_P0 = np.array([PAYLOAD_WIDTH / 2.0, collar_top_y])
+    ci_P3 = inner_curve[0]
+    ci_P1 = np.array([PAYLOAD_WIDTH / 2.0, collar_top_y - collar_top_y * 0.4])
+    ci_P2 = ci_P3 + np.array([0.0, min(collar_top_y * 0.3, abs(ci_P3[1] - ci_P0[1]) * 0.4)])
+    collar_inner_edge = np.array([cubic_bezier(ci_P0, ci_P1, ci_P2, ci_P3, t) for t in collar_t_vals])
 
     # Outer edge: cubic Bezier from collar top to bell outer surface
     bell_outer_start = outer_curve[0]
@@ -214,13 +218,18 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
         bridge_half_w = PAYLOAD_WIDTH / 2.0 + 0.015
 
     # D. The Transverse Bridge
-    # Plate of jelly under payload connecting left and right sides
+    # Plate of jelly under payload connecting left and right sides.
+    # When no payload: widened and extended upward to fill the payload slot with jelly
+    # so the cavity doesn't stay open (water would otherwise pool there).
+    if not with_payload:
+        bridge_half_w = max(bridge_half_w, PAYLOAD_WIDTH / 2.0 + 0.02)
     bridge_thick = 0.03
+    bridge_top = PAYLOAD_HEIGHT if not with_payload else 0.0
     mask_bridge = (
         (candidate_points[:, 0] >= -bridge_half_w) &
         (candidate_points[:, 0] <= bridge_half_w) &
         (candidate_points[:, 1] >= -bridge_thick) &
-        (candidate_points[:, 1] <= 0.0)
+        (candidate_points[:, 1] <= bridge_top)
     )
 
     # 6. Assemble Soft Body Materials
@@ -275,13 +284,14 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
         all_soft_mats = np.zeros(0, dtype=int)
         all_soft_fiber = np.zeros((0, 2), dtype=np.float32)
 
-    # 8. Generate Payload (Material 2)
-    # Explicitly generated to ensure it fits perfectly in the gap we left
-    px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
-    py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT*raster_res))
-    pgx, pgy = np.meshgrid(px, py)
-    payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
-    
+    # 8. Generate Payload (Material 2) — omitted in payloadless mode
+    payload_particles = None
+    if with_payload:
+        px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
+        py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT*raster_res))
+        pgx, pgy = np.meshgrid(px, py)
+        payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
+
     # 9. Combine & Apply spawn offset
     offset = np.array(spawn_offset)
 
@@ -294,7 +304,7 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
         final_mat.append(all_soft_mats)
         final_fiber.append(all_soft_fiber)
 
-    if len(payload_particles) > 0:
+    if payload_particles is not None and len(payload_particles) > 0:
         final_pos.append(payload_particles + offset)
         final_mat.append(np.ones(len(payload_particles), dtype=int) * 2)
         pf = np.zeros((len(payload_particles), 2), dtype=np.float32)
@@ -309,7 +319,7 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128):
     else:
         return np.zeros((0, 2)), np.zeros(0, dtype=int), np.zeros((0, 2), dtype=np.float32), True
 
-def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005):
+def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005, with_payload=True):
     """
     Creates a complete particle set with PHYSICALLY CORRECT spacing.
     """
@@ -317,7 +327,7 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
         spawn_offset = DEFAULT_SPAWN
 
     # 1. Generate robot particles
-    robot_pos, robot_mat, robot_fiber, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res)
+    robot_pos, robot_mat, robot_fiber, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res, with_payload=with_payload)
     n_robot = len(robot_pos)
 
     # 2. Generate Water Grid
@@ -395,15 +405,17 @@ def random_genome():
 if __name__ == "__main__":
     import sys
 
-    # Show Aurelia genome if --aurelia flag, otherwise random
+    with_payload = "--no-payload" not in sys.argv
     if "--aurelia" in sys.argv:
         genome = AURELIA_GENOME
         title = "Aurelia aurita (Moon Jelly) Reference"
     else:
         genome = random_genome()
         title = "Random Genome"
+    if not with_payload:
+        title += " (no payload)"
 
-    pos, mat, _, self_intersecting = generate_phenotype(genome)
+    pos, mat, _, self_intersecting = generate_phenotype(genome, with_payload=with_payload)
     print(f"{title}: {genome}")
     print(f"Particles: {len(pos)} (jelly={np.sum(mat==1)}, muscle={np.sum(mat==3)}, payload={np.sum(mat==2)})")
     if self_intersecting:
