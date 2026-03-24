@@ -58,10 +58,13 @@ fitness = displacement / sqrt(muscle_count / 500)
 
 This penalises bloated muscle mass — a shape that moves twice as far with the same muscle scores identically to one that uses half the muscle for the same displacement. The 500 normalisation factor keeps the metric near unity for typical genomes.
 
-**Validity checks** (instance marked invalid, assigned `worst_valid_fitness - 1`):
-- Payload CoM at y > 0.93 (ceiling-riding exploit)
-- Payload CoM at y < 0.01 (floor contact)
-- muscle_count < 200 (degenerate/empty morphology)
+**Validity checks** (instance marked invalid, assigned `worst_valid_fitness + 1`):
+- Payload CoM at y < 0.01 (floor contact) — GPU side
+- muscle_count < 200 (degenerate/empty morphology) — CPU side
+- Self-intersecting morphology — CPU side
+
+**Ceiling cap** (not invalid, just capped):
+- `displacement = min(final_y, 0.93) - init_y` — ceiling-riders score the same as y=0.93; once the population saturates against the ceiling evolution pivots to muscle efficiency
 
 Drift penalty (`- 1.0 * drift`) is implemented but currently commented out in `evolve.py`.
 

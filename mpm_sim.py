@@ -10,8 +10,10 @@ ti.init(arch=ti.cuda)  # CUDA required
 # Simulation Constants
 n_instances = int(os.environ.get('JELLY_INSTANCES', '16'))
 quality = 1  # 1=low-res (128 grid), 2=high-res (256 grid)
-n_particles = 80000
+n_particles = int(os.environ.get('JELLY_PARTICLES', '80000'))
 n_grid = 128 * quality
+n_grid_y = int(os.environ.get('JELLY_GRID_Y', str(n_grid)))  # rows (y-axis); default = square
+domain_height = float(os.environ.get('JELLY_DOMAIN_H', '1.0'))  # physical domain height
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 2e-5 / quality
 p_vol = (dx * 0.5) ** 2
@@ -85,8 +87,8 @@ C = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))
 F = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))
 material = ti.field(dtype=int, shape=(n_instances, n_particles))
 Jp = ti.field(dtype=float, shape=(n_instances, n_particles))
-grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))
-grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid))
+grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid_y))
+grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
 
 sim_time = ti.field(dtype=float, shape=())
 frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
@@ -146,7 +148,7 @@ def substep():
         if material[m, p] < 0: continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
-        if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2: continue
+        if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid_y - 2: continue
         
         fx = x[m, p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
@@ -220,26 +222,27 @@ def substep():
             #grid_v[m, i, j] *= 0.99998
             
             # Boundary Damping (all four sides)
-            damp_cells = n_grid // 20
+            damp_cells_x = n_grid // 20
+            damp_cells_y = n_grid_y // 20
             damp = 1.0
-            if i < damp_cells: damp *= 0.95 + 0.05 * i / damp_cells
-            if i > n_grid - damp_cells: damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells
-            if j < damp_cells: damp *= 0.95 + 0.05 * j / damp_cells
-            if j > n_grid - damp_cells: damp *= 0.95 + 0.05 * (n_grid - j) / damp_cells
+            if i < damp_cells_x: damp *= 0.95 + 0.05 * i / damp_cells_x
+            if i > n_grid - damp_cells_x: damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells_x
+            if j < damp_cells_y: damp *= 0.95 + 0.05 * j / damp_cells_y
+            if j > n_grid_y - damp_cells_y: damp *= 0.95 + 0.05 * (n_grid_y - j) / damp_cells_y
             grid_v[m, i, j] *= damp
 
             # Wall Collisions
             if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
             if i > n_grid - 3 and grid_v[m, i, j][0] > 0: grid_v[m, i, j][0] = 0
             if j < 3 and grid_v[m, i, j][1] < 0: grid_v[m, i, j][1] = 0
-            if j > n_grid - 3 and grid_v[m, i, j][1] > 0: grid_v[m, i, j][1] = 0
+            if j > n_grid_y - 3 and grid_v[m, i, j][1] > 0: grid_v[m, i, j][1] = 0
 
     # 4. G2P
     for m, p in x:
         if material[m, p] < 0: continue
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
-        if base[0] >= 0 and base[1] >= 0 and base[0] < n_grid - 2 and base[1] < n_grid - 2:
+        if base[0] >= 0 and base[1] >= 0 and base[0] < n_grid - 2 and base[1] < n_grid_y - 2:
             fx = x[m, p] * inv_dx - base.cast(float)
             w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
             new_v = ti.Vector.zero(float, 2)
@@ -255,8 +258,8 @@ def substep():
         v[m, p][1] -= dt * gravity  # uniform gravity for all active particles
         x[m, p] += dt * v[m, p]
         
-        for d in ti.static(range(2)):
-            x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
+        x[m, p][0] = ti.max(ti.min(x[m, p][0], 0.999), 0.001)
+        x[m, p][1] = ti.max(ti.min(x[m, p][1], domain_height - 0.001), 0.001)
     
     #5. Glowing Effect?
     for m, p in x:
@@ -372,8 +375,8 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         # --- SPLATTING ---
         if intensity > 0.001:
             row, col = m // p_grid_side, m % p_grid_side
-            center_x = (pos[0] + col) * p_res_sub
-            center_y = ((1.0 - pos[1]) + row) * p_res_sub
+            center_x = (pos[0] / domain_height + col) * p_res_sub
+            center_y = ((domain_height - pos[1]) / domain_height + row) * p_res_sub
             
             draw_r = radius * 1.5
             low_x, high_x = int(center_x - draw_r), int(center_x + draw_r)
@@ -411,8 +414,8 @@ def render_flat_pass(p_res_sub: int, p_grid_side: int, radius: float,
             continue
 
         row, col = m // p_grid_side, m % p_grid_side
-        center_x = (pos[0] + col) * p_res_sub
-        center_y = ((1.0 - pos[1]) + row) * p_res_sub
+        center_x = (pos[0] / domain_height + col) * p_res_sub
+        center_y = ((domain_height - pos[1]) / domain_height + row) * p_res_sub
 
         draw_r = radius
         low_x = int(center_x - draw_r)
@@ -444,7 +447,7 @@ def render_vorticity_overlay(p_res_sub: int, p_grid_side: int, vort_scale: float
         0.003  — weak pulses or early-generation morphologies
     """
     for m, i, j in grid_v:
-        if i < 1 or i >= n_grid - 1 or j < 1 or j >= n_grid - 1:
+        if i < 1 or i >= n_grid - 1 or j < 1 or j >= n_grid_y - 1:
             continue
         if grid_m[m, i, j] <= 0.0:
             continue
@@ -460,8 +463,8 @@ def render_vorticity_overlay(p_res_sub: int, p_grid_side: int, vort_scale: float
         else:
             col = ti.Vector([0.0, 0.4, 1.0]) * vort_intensity   # cool: CW
         row, c = m // p_grid_side, m % p_grid_side
-        cell_x = int((float(i) / n_grid + c) * p_res_sub)
-        cell_y = int(((1.0 - float(j) / n_grid) + row) * p_res_sub)
+        cell_x = int((float(i) / n_grid / domain_height + c) * p_res_sub)
+        cell_y = int(((domain_height - float(j) / n_grid) / domain_height + row) * p_res_sub)
         cell_px = ti.max(1, p_res_sub // n_grid)
         for px in range(cell_x - cell_px // 2, cell_x + cell_px // 2 + 1):
             for py in range(cell_y - cell_px // 2, cell_y + cell_px // 2 + 1):

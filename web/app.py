@@ -39,7 +39,7 @@ CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
 CUSTOM_THUMBS.mkdir(parents=True, exist_ok=True)
 
 # Genome bounds
-GENOME_LOWER = [0.0, -0.15, 0.0, -0.2, 0.05, -0.45, 0.025, 0.025, 0.01]
+GENOME_LOWER = [0.0, -0.15, 0.0, -0.2, 0.05, -0.30, 0.025, 0.025, 0.01]
 GENOME_UPPER = [0.25, 0.15, 0.3, 0.15, 0.35, -0.03, 0.08, 0.1, 0.04]
 GENOME_DEFAULT = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 

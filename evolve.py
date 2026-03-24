@@ -42,7 +42,7 @@ START_SIGMA = 0.25
 OUTPUT_DIR = "output"
 
 # Genome bounds: [cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, t_base, t_mid, t_tip]
-GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05, -0.45,  0.025,  0.025,  0.01]
+GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05, -0.30,  0.025,  0.025,  0.01]
 GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35, -0.03,  0.08,   0.1,    0.04]
 GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 

@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 # --- CONFIGURATION ---
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05
-DEFAULT_SPAWN = np.array([0.5, 0.55])  # Centred vertically; deepest bell tip (end_y=-0.45) reaches y≈0.10
+DEFAULT_SPAWN = np.array([0.5, 0.40])  # Below midline; deepest bell tip (end_y=-0.30) reaches y≈0.10
 
 # Aurelia aurita (moon jelly) reference genome:
 # Wide, shallow bell with moderate thickness — biomimetic baseline.
@@ -319,9 +319,10 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128, with_payload=Tru
     else:
         return np.zeros((0, 2)), np.zeros(0, dtype=int), np.zeros((0, 2), dtype=np.float32), True
 
-def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005, with_payload=True):
+def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_margin=0.005, with_payload=True, domain_height=1.0):
     """
     Creates a complete particle set with PHYSICALLY CORRECT spacing.
+    domain_height: physical height of the simulation domain (default 1.0 = square tank).
     """
     if spawn_offset is None:
         spawn_offset = DEFAULT_SPAWN
@@ -332,10 +333,10 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
 
     # 2. Generate Water Grid
     spacing = 1.0 / (grid_res * 2.0)
-    
+
     margin = spacing * 3
     wx = np.arange(margin, 1.0 - margin, spacing)
-    wy = np.arange(margin, 1.0 - margin, spacing) 
+    wy = np.arange(margin, domain_height - margin, spacing)
 
     wgx, wgy = np.meshgrid(wx, wy)
     water_candidates = np.vstack([wgx.ravel(), wgy.ravel()]).T
@@ -395,7 +396,7 @@ def random_genome():
     genome[2] = np.random.uniform(0.0, 0.3)     # cp2_x
     genome[3] = np.random.uniform(-0.2, 0.15)   # cp2_y
     genome[4] = np.random.uniform(0.05, 0.35)   # end_x
-    genome[5] = np.random.uniform(-0.45, -0.03) # end_y
+    genome[5] = np.random.uniform(-0.30, -0.03) # end_y
     genome[6] = np.random.uniform(0.025, 0.08)  # t_base
     genome[7] = np.random.uniform(0.025, 0.1)   # t_mid
     genome[8] = np.random.uniform(0.01, 0.04)   # t_tip
