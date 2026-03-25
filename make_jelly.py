@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
@@ -7,6 +8,10 @@ from scipy.spatial import cKDTree
 PAYLOAD_WIDTH = 0.08
 PAYLOAD_HEIGHT = 0.05
 DEFAULT_SPAWN = np.array([0.5, 0.40])  # Below midline; deepest bell tip (end_y=-0.30) reaches y≈0.10
+AXISYM_SPAWN  = np.array([0.0, 0.40])  # Axisym: bell axis at r=0 (left boundary)
+
+# Axisymmetric mode: right-half profile only, no mirroring (JELLY_AXISYM=1 env var)
+_AXISYM = os.environ.get('JELLY_AXISYM', '0') == '1'
 
 # Aurelia aurita (moon jelly) reference genome:
 # Wide, shallow bell with moderate thickness — biomimetic baseline.
@@ -267,8 +272,13 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128, with_payload=Tru
         _, sp_idx = spine_tree.query(right_points[muscle_mask_r])
         right_fiber[muscle_mask_r] = spine_tangents[sp_idx]
 
-    # 7. Mirror to create Full Body
-    if len(right_points) > 0:
+    # 7. Mirror to create Full Body (Cartesian only; axisym uses right-half profile directly)
+    if _AXISYM:
+        # Axisymmetric mode: right-half profile IS the full cross-section (r >= 0)
+        all_soft_pos  = right_points
+        all_soft_mats = right_mats
+        all_soft_fiber = right_fiber
+    elif len(right_points) > 0:
         left_pos = right_points.copy()
         left_pos[:, 0] *= -1
         left_mats = right_mats.copy()
@@ -285,9 +295,13 @@ def generate_phenotype(genome, spawn_offset=None, grid_res=128, with_payload=Tru
         all_soft_fiber = np.zeros((0, 2), dtype=np.float32)
 
     # 8. Generate Payload (Material 2) — omitted in payloadless mode
+    # Axisym mode: right half only (r >= 0), so payload spans [0, PAYLOAD_WIDTH/2]
     payload_particles = None
     if with_payload:
-        px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
+        if _AXISYM:
+            px = np.linspace(0, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH/2*raster_res))
+        else:
+            px = np.linspace(-PAYLOAD_WIDTH/2, PAYLOAD_WIDTH/2, int(PAYLOAD_WIDTH*raster_res))
         py = np.linspace(0, PAYLOAD_HEIGHT, int(PAYLOAD_HEIGHT*raster_res))
         pgx, pgy = np.meshgrid(px, py)
         payload_particles = np.vstack([pgx.ravel(), pgy.ravel()]).T
@@ -323,9 +337,10 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
     """
     Creates a complete particle set with PHYSICALLY CORRECT spacing.
     domain_height: physical height of the simulation domain (default 1.0 = square tank).
+    Axisym mode (JELLY_AXISYM=1): uses right-half profile only, spawn at r=0 axis.
     """
     if spawn_offset is None:
-        spawn_offset = DEFAULT_SPAWN
+        spawn_offset = AXISYM_SPAWN if _AXISYM else DEFAULT_SPAWN
 
     # 1. Generate robot particles
     robot_pos, robot_mat, robot_fiber, self_intersecting = generate_phenotype(genome, spawn_offset, grid_res=grid_res, with_payload=with_payload)

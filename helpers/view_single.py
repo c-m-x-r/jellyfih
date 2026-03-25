@@ -186,7 +186,9 @@ def main():
     output_path = args.output or _os.path.join(OUTPUT_DIR, f"view_single_{label}{suffix}.mp4")
 
     # Generate phenotype once; broadcast to all GPU instances
-    print(f"Generating phenotype (with_payload={with_payload})...", flush=True)
+    axisym_mode = _os.environ.get('JELLY_AXISYM', '0') == '1'
+    print(f"Generating phenotype (with_payload={with_payload}"
+          + (", AXISYM" if axisym_mode else "") + ")...", flush=True)
     pos, mat, fiber, stats = fill_tank(genome, sim.n_particles, with_payload=with_payload)
     print(f"  jelly={stats['n_jelly']}  muscle={stats['muscle_count']}  "
           f"payload={int(np.sum(mat == 2))}  water={stats['n_water']}")

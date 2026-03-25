@@ -14,6 +14,7 @@ n_particles = int(os.environ.get('JELLY_PARTICLES', '80000'))
 n_grid = 128 * quality
 n_grid_y = int(os.environ.get('JELLY_GRID_Y', str(n_grid)))  # rows (y-axis); default = square
 domain_height = float(os.environ.get('JELLY_DOMAIN_H', '1.0'))  # physical domain height
+axisym = os.environ.get('JELLY_AXISYM', '0') == '1'  # axisymmetric (r,z) MPM — off by default
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 2e-5 / quality
 p_vol = (dx * 0.5) ** 2
@@ -80,7 +81,8 @@ res_sub = video_res // grid_side
 visual_glow = ti.field(dtype=float, shape=(n_instances, n_particles))
 
 # --- GPU MEMORY ALLOCATION ---
-print(f"Allocating {n_instances} instances with {n_particles} particles each...")
+print(f"Allocating {n_instances} instances with {n_particles} particles each..."
+      + (" [AXISYM mode: JELLY_AXISYM=1]" if axisym else ""))
 x = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 C = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))
@@ -122,6 +124,14 @@ instance_act_contraction = ti.field(dtype=float, shape=(n_instances,))
 # Scales actuation frequency relative to the global actuation_freq constant.
 instance_freq = ti.field(dtype=float, shape=(n_instances,))
 
+# Axisymmetric MPM fields (always allocated; only written/read when axisym=True via JELLY_AXISYM=1)
+# r_ref:           reference radial position at spawn, for hoop-stretch calculation
+# grid_stress_rr:  per-node mass-weighted Kirchhoff σ_rr accumulation (P2G scratch)
+# grid_stress_hoop: per-node mass-weighted Kirchhoff σ_θθ accumulation (P2G scratch)
+r_ref            = ti.field(dtype=float, shape=(n_instances, n_particles))
+grid_stress_rr   = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
+grid_stress_hoop = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
+
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
 # Per-instance muscle hue (default offset by 0.15 from jelly hue for contrast)
@@ -150,6 +160,9 @@ def substep():
     for m, i, j in grid_m:
         grid_v[m, i, j] = [0, 0]
         grid_m[m, i, j] = 0
+        if ti.static(axisym):
+            grid_stress_rr[m, i, j] = 0.0
+            grid_stress_hoop[m, i, j] = 0.0
 
     # 2. P2G
     for m, p in x:
@@ -219,18 +232,43 @@ def substep():
             fd = fiber_dir[m, p]
             stress += fd.outer_product(fd) * contractile_pressure * J
 
+        # Axisymmetric hoop-stress correction: compute before scaling.
+        # kirch_rr_val  = Kirchhoff σ_rr (accumulated on grid for hoop force term)
+        # kirch_hoop_val = Kirchhoff σ_θθ from circumferential stretch λ_θ = r / r_ref
+        # For water (mu=0): both equal la*J*(J-1), so correction vanishes automatically.
+        # For solid: linearised hoop: 2μ(λ_θ-1) + λJ(J-1).
+        kirch_rr_val = 0.0
+        kirch_hoop_val = 0.0
+        r_p_axisym = 0.0
+        if ti.static(axisym):
+            kirch_rr_val = stress[0, 0]
+            r_p_axisym = x[m, p][0]
+            r_ref_p = ti.max(r_ref[m, p], dx * 0.1)
+            lambda_theta = ti.max(r_p_axisym, dx * 0.05) / r_ref_p
+            kirch_hoop_val = 2.0 * mu * (lambda_theta - 1.0) + la * J * (J - 1.0)
+
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
-        
+
         # Affine momentum transfer (APIC)
         # Uses current_mass to properly weight the heavy payload
         affine = stress + current_mass * C[m, p]
-        
+
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
             weight = w[i][0] * w[j][1]
-            grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
-            grid_m[m, base + offset] += weight * current_mass
+            if ti.static(axisym):
+                # Annular mass weighting: each particle represents a ring of radius r_p.
+                # Scale momentum and mass by r_p so grid normalization gives
+                # correctly r-weighted velocity averages.
+                grid_v[m, base + offset] += weight * (current_mass * r_p_axisym * v[m, p] + affine @ dpos)
+                grid_m[m, base + offset] += weight * current_mass * r_p_axisym
+                # Accumulate mass-weighted Kirchhoff stresses for hoop correction in grid update
+                grid_stress_rr[m, base + offset]   += weight * current_mass * kirch_rr_val
+                grid_stress_hoop[m, base + offset] += weight * current_mass * kirch_hoop_val
+            else:
+                grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
+                grid_m[m, base + offset] += weight * current_mass
 
     # 3. Grid Operations
     for m, i, j in grid_m:
@@ -251,8 +289,21 @@ def substep():
             if j > n_grid_y - damp_cells_y: damp *= 0.95 + 0.05 * (n_grid_y - j) / damp_cells_y
             grid_v[m, i, j] *= damp
 
-            # Wall Collisions
-            if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
+            # Hoop stress geometric correction (axisym only).
+            # The r-momentum equation in cylindrical coords has an extra (σ_rr - σ_θθ)/r term.
+            # Apply it as a post-normalisation velocity correction.
+            if ti.static(axisym):
+                r_node = (i + 0.5) * dx  # cell-centre radius; avoids exact i=0 division
+                if r_node > dx:          # skip axis cell (i=0) — correction handled by BC below
+                    hoop_diff = (grid_stress_rr[m, i, j] - grid_stress_hoop[m, i, j]) / grid_m[m, i, j]
+                    grid_v[m, i, j][0] += dt * hoop_diff / r_node
+
+            # Wall Collisions / Axis BC
+            if ti.static(axisym):
+                # Axis of symmetry at i=0: enforce zero radial velocity
+                if i == 0: grid_v[m, i, j][0] = 0.0
+            else:
+                if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
             if i > n_grid - 3 and grid_v[m, i, j][0] > 0: grid_v[m, i, j][0] = 0
             if j < 3 and grid_v[m, i, j][1] < 0: grid_v[m, i, j][1] = 0
             if j > n_grid_y - 3 and grid_v[m, i, j][1] > 0: grid_v[m, i, j][1] = 0
@@ -673,6 +724,7 @@ def _load_particles_kernel(instance: int, pos_np: ti.types.ndarray(),
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
         fiber_dir[instance, p] = [fiber_np[p, 0], fiber_np[p, 1]]
+        r_ref[instance, p] = pos_np[p, 0]  # reference radial position for axisym hoop stretch
 
 
 def load_particles(instance, pos_np, mat_np, fiber_np=None):
