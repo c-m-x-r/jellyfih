@@ -151,3 +151,54 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=3 JELLY_INSTANCES=32 JELLY_GRID_Y=256 JE
 - **Hoop correction too large**: if the (σ_rr − σ_θθ)/r force is poorly scaled, it may dominate the dynamics; watch for runaway radial oscillations in early generations
 - **Degenerate bell**: without mirror symmetry the bell is now a right-half profile; degenerate shapes that exploit the axis BC (very narrow bells pressed against r=0) may emerge as a spurious fitness mode
 - **Performance too slow**: if axisym overhead pushes time/gen > 700s, reduce steps to 100K for this run only
+
+---
+
+## Results
+
+**Date:** 2026-03-25
+**Hardware:** 4× RTX 3080 Ti, seed 42, single replicate
+**Status:** ✅ Complete (50/50 gens)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Best displacement | **+1.274** (gen 33) | In axisym (r,z) coordinates — not directly comparable to Cartesian |
+| Final-gen best | +1.174 | |
+| 90% convergence | gen 2 | Misleading — landscape is broad, not sharply peaked |
+| Final sigma | 0.410 | Still exploring — did NOT converge |
+| Final cond # | 21.2 | Broader landscape than Cartesian (Exp 3: 62.9) |
+| Muscle count (best) | 288 | ~half of Exp 3 (674) — right-half profile only |
+| Sim time/gen | ~131s | ~2.8× faster than Cartesian (half particles) |
+| Total invalids | 192/1600 (12%) | Acceptable |
+
+### Gene convergence (many NOT locked)
+
+| Gene | Final mean | Locked? | Notes |
+|------|-----------|---------|-------|
+| cp1_x | +0.126 | ✅ CV=0.15 | |
+| cp1_y | −0.051 | ❌ CV=0.18 | Unlocked — bell curvature still explored |
+| cp2_x | +0.246 | ✅ CV=0.14 | |
+| cp2_y | **+0.114** | ✅ CV=0.10 | **Positive** — opposite sign to Cartesian (−0.19) |
+| end_x | +0.266 | ❌ CV=0.15 | Not pressing upper bound (Cartesian did) |
+| end_y | −0.254 | ✅ CV=0.09 | Deeper cup than Cartesian (−0.128) |
+| t_base | +0.055 | ✅ CV=0.12 | Thinner than Cartesian (0.079) |
+| t_mid | +0.050 | ❌ CV=0.18 | Unlocked |
+| contraction | +0.289 | ❌ CV=0.19 | Unlocked — near default |
+| freq_mult | **+1.143** | ✅ CV=0.15 | Slightly above baseline — opposite to Exp 6 |
+
+### Key findings
+
+- **Different attractor from Cartesian**: cp2_y is positive (+0.114) vs Cartesian's negative (−0.19). end_x not pressing upper bound. The axisym physics genuinely changes the optimal bell geometry. This is the experiment's central result.
+- **Not converged at 50 gens**: sigma=0.41, many genes unlocked. The axisym landscape is significantly flatter than Cartesian — more degrees of freedom remain viable. Would benefit from more generations or higher lambda.
+- **freq_mult at 1.14** (slightly above 1 Hz): opposite direction from Exp 6 (0.50 Hz) and opposite from Exp 3 (0.90 Hz). The correct cylindrical pressure recovery may make higher-frequency firing slightly more efficient.
+- **Thinner bell base (t_base=0.055)** vs Cartesian's 0.077-0.079: axisym geometry changes the structural loading on the bell manubrium.
+- **Validation criteria**: no NaN explosions, numerically stable for 50 gens — axisym physics implementation is robust. Formal Cartesian/axisym symmetry test and vortex ring visualisation still pending.
+
+### Success criteria outcome
+
+| Criterion | Result |
+|-----------|--------|
+| No NaN / explosion | ✅ Stable all 50 gens |
+| Displacement positive | ✅ +1.274 |
+| Morphology different from Exp 3 | ✅ cp2_y sign flip, end_x unlocked, thinner base |
+| Vortex ring structure (visual) | ⏳ Not yet rendered |

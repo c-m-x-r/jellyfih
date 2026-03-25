@@ -9,12 +9,12 @@ MPM simulation (Taichi), CMA-ES, 2D.
 
 | # | File | Status | Key question | Best fitness |
 |---|------|--------|-------------|-------------|
-| 1 | [EXPERIMENT_1.md](EXPERIMENT_1.md) | ✅ Complete | What morphology emerges from shape-only search? | 0.536 |
-| 2 | [EXPERIMENT_2.md](EXPERIMENT_2.md) | ✅ Complete (19/50 gens) | Does evolved timing unlock better performance? | 1.179 |
-| 3 | [EXPERIMENT_3.md](EXPERIMENT_3.md) | 🔲 Planned | Raw displacement + frequency as gene | — |
-| 4 | [EXPERIMENT_4.md](EXPERIMENT_4.md) | 🔲 Planned | Does payload shape the morphology attractor? | — |
-| 5 | [EXPERIMENT_5.md](EXPERIMENT_5.md) | 🔲 Planned | Does axisymmetric physics change the optimal morphology? | — |
-| 6 | [EXPERIMENT_6.md](EXPERIMENT_6.md) | 🔲 Planned | Control: new genome + efficiency fitness (Exp 2 replication in tall tank) | — |
+| 1 | [EXPERIMENT_1.md](EXPERIMENT_1.md) | ✅ Complete | What morphology emerges from shape-only search? | 0.536 (efficiency) |
+| 2 | [EXPERIMENT_2.md](EXPERIMENT_2.md) | ✅ Complete (19/50 gens) | Does evolved timing unlock better performance? | 1.179 (efficiency) |
+| 3 | [EXPERIMENT_3.md](EXPERIMENT_3.md) | ✅ Complete (50/50 gens, s42) | Raw displacement + frequency as gene | **0.838** (displacement) |
+| 4 | [EXPERIMENT_4.md](EXPERIMENT_4.md) | 🔖 Checkpoint (2/50 gens) | Does payload shape the morphology attractor? | — (resume needed) |
+| 5 | [EXPERIMENT_5.md](EXPERIMENT_5.md) | ✅ Complete (50/50 gens, s42) | Does axisymmetric physics change the optimal morphology? | **1.274** disp (axisym) |
+| 6 | [EXPERIMENT_6.md](EXPERIMENT_6.md) | ✅ Complete (50/50 gens, s137) | Control: new genome + efficiency fitness | **1.327** (efficiency) 🏆 |
 
 ---
 
@@ -47,12 +47,16 @@ MPM simulation (Taichi), CMA-ES, 2D.
 
 ## Key findings to date
 
-- **Morphology attractor**: wide flat-tipped bell, `end_x` ≈ 0.34, `t_base` ≈ 0.076, robust across all seeds and experiments
-- **Jet mode**: evolution converges to high refractory (~65–75%), minimal relaxation (5% floor), long coast
-- **Relaxation gene vestigial**: should be removed from Exp 3 onward
+- **Morphology attractor**: wide flat-tipped bell, `end_x` ≈ 0.34, `t_base` ≈ 0.077, robust across all seeds and experiments — **physics-determined, not fitness-determined** (Exp 3 confirmed: same attractor with raw displacement fitness)
+- **Jet mode**: evolution converges to high refractory (~65–75%), minimal relaxation (5% floor), long coast (Exp 2). With freq_mult encoding (Exp 3/6): contraction_frac locks, not refractory.
+- **Relaxation gene vestigial**: removed in Exp 3+ genome redesign
 - **Cost of transport trade-off**: demonstrated explicitly in Exp 2 (s2024 higher displacement, lower fitness)
-- **Ceiling exploit**: still present in square tank; tall tank required for unconstrained displacement experiments
-- **Cup bells not found**: relaxing end_y upper bound to +0.10 did not unlock cup morphologies
+- **Ceiling exploit**: resolved by tall tank (128×256); Exps 3/5/6 unconstrained
+- **Cup bells not found**: relaxing end_y upper bound to +0.10 did not unlock cup morphologies (Exp 2); end_y locks at −0.128 to −0.254 across experiments
+- **freq_mult diverges by fitness function** (Exp 3 vs 6): displacement fitness → contraction_frac presses upper (0.55), freq_mult ≈ 0.90; efficiency fitness → freq_mult presses lower bound (0.50 Hz), short contractions (0.29). Lower bound should be extended.
+- **New efficiency record: 1.327** (Exp 6, s137) — 12.5% above Exp 2's 1.179; tall tank + freq_mult encoding both contributed
+- **Axisym finds different attractor** (Exp 5): cp2_y sign flips to positive, end_x unlocked, thinner base — axisym physics genuinely changes the optimal bell shape. Landscape much broader (sigma=0.41 at gen 49, not converged)
+- **Exp 4 (no-payload)**: validity bug fixed; partial run saved at checkpoint gen 2 — resume pending
 
 ---
 

@@ -106,3 +106,38 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=3 JELLY_INSTANCES=32 JELLY_GRID_Y=256 JE
 
 - **Morphology collapse**: without payload anchor, bell may fold inward or generate degenerate shapes. May need validity check on bell symmetry.
 - **Trivial swimmer**: payloadless bell may evolve to an arbitrarily thin membrane with huge muscle fraction — ensure muscle_count < 200 invalidity check still applies.
+
+---
+
+## Results
+
+**Date:** 2026-03-25
+**Hardware:** 4× RTX 3080 Ti, seed 999
+**Status:** 🔖 Incomplete — 2/50 gens (checkpoint saved, GPU reassigned mid-run)
+
+### Run history
+
+Experiment 4 had a troubled run:
+1. **First attempt (GPU 2, 3070 cluster):** crashed gen 0 — bug: `run_batch_headless` returned `valid=0` for all instances when payload count=0 (body CoM y=0 failed the `y > 0.01` gate). Fixed by adding `compute_body_stats()` fallback kernel.
+2. **Second attempt (GPU 2, 3080 Ti):** cancelled before launch — GPU 2 had a broken cooling fan; banned from use.
+3. **Third attempt (GPU 3, queued after Exp 5):** launched successfully. Gen 0 anomalously slow (2004s) — JIT compilation + possible brief GPU contention during Exp 5 transition. Gen 1-2 nominal (~760s/gen). Killed at gen 2 to avoid leaving 2 GPUs idle while waiting for full 50-gen completion.
+
+### Partial results (2 gens)
+
+| Metric | Gen 0 | Gen 1 | Gen 2 |
+|--------|-------|-------|-------|
+| Best displacement (body CoM) | +0.548 | +0.843 | +0.878 |
+| Avg displacement | +0.069 | +0.246 | +0.285 |
+| Invalid | 12/32 | 6/32 | 3/32 |
+| Sim/gen | 2004s* | 759s | 761s |
+
+*Gen 0 slow: JIT + possible contention
+
+### Observations
+- Body CoM tracking fix is working — invalids decreasing normally (12→6→3)
+- Gen 2 best displacement +0.878 is competitive with Exp 3's early gens — no obvious penalty from missing payload
+- Checkpoint `checkpoint_exp4_s999.pkl` saved at gen 2 for future resume
+
+### Next steps
+Resume with: `uv run python evolve.py --gens 50 --seed 999 --run-id exp4_s999 --tall --no-payload`
+(CMA-ES will auto-resume from checkpoint)

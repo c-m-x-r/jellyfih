@@ -158,3 +158,48 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=3 JELLY_INSTANCES=32 JELLY_GRID_Y=256 JE
 - **Ceiling reached even in tall tank**: if raw displacement > 1.5 units, extend steps or use 3-cycle window
 - **Frequency rail to 2.0**: if all runs max freq_mult, extend upper bound to 3.0 Hz
 - **s999 crash repeat**: stagger launch by 5s to avoid CUDA init race condition
+
+---
+
+## Results
+
+**Date:** 2026-03-25
+**Hardware:** 4× RTX 3080 Ti, seed 42, single replicate
+**Status:** ✅ Complete (50/50 gens)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Best displacement | **+0.838** (gen 43) | ✅ Exceeds >0.63 threshold |
+| Final-gen best | +0.816 | Slight late-gen noise |
+| 90% convergence | gen 16 | Fast — attractor found early |
+| Final sigma | 0.101 | Tight — fully converged |
+| Final cond # | 62.9 | Extremely narrow ridge |
+| Muscle count (best) | 674 | High — no penalty for size |
+| Sim time/gen | ~368s | On 3080 Ti, tall tank |
+
+### Locked genes (all CV < 0.15 — fully converged)
+
+| Gene | Final mean | Bound pressing? |
+|------|-----------|-----------------|
+| end_x | 0.348 | ← upper (0.35) |
+| t_base | 0.079 | ← upper (0.08) |
+| contraction_frac | 0.550 | ← upper (0.60) |
+| freq_mult | 0.900 | — |
+| cp1_x | 0.005 | ← lower (0.0) |
+| cp2_y | −0.195 | ← lower (−0.20) |
+
+### Key findings
+
+- **Same morphological attractor as Exp 1/2**: wide bell, end_x at upper bound, thick base — efficiency pressure was not shaping the Exp 2 morphology. The bell shape is intrinsic to the physics, not the cost function.
+- **Contraction pressing upper bound (0.55/0.60)**: with no muscle-count penalty, evolution maximises firing fraction. The jellyfish wants to contract 55% of each cycle.
+- **freq_mult settled at 0.90** (slightly sub-1 Hz): counter-intuitive — without frequency being penalised, evolution chose slightly *slower* than baseline. Likely the vortex wake requires a minimum recovery time regardless of muscle cost.
+- **674 muscles** vs Exp 6's 472 — confirms efficiency pressure was suppressing muscle growth in Exp 2.
+
+### Success criteria outcome
+
+| Criterion | Result |
+|-----------|--------|
+| Displacement > 0.63 | ✅ 0.838 |
+| Frequency convergence (CV < 0.3) | ✅ CV = 0.03 |
+| Morphology shift from Exp 2 | ❌ Same attractor (end_x, t_base locked identically) |
+| Freq × contraction coupling | Not measured (single seed) |

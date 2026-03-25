@@ -162,3 +162,49 @@ echo "All experiments complete."
 - **freq_mult ignored (CV > 0.6 throughout)**: gene 10 is just noise with efficiency fitness; confirms the fitness function is insensitive to frequency. Fine — this is useful information.
 - **Morphology collapse**: if removing the refractory gene destabilises early-generation individuals, invalidity rate may spike. Check `n_invalid` in log for first 5 gens.
 - **Lower fitness than Exp 2**: would indicate tall tank introduces additional challenge (e.g. longer time to reach steady state, or damping layer effects at larger domain). Flag for investigation.
+
+---
+
+## Results
+
+**Date:** 2026-03-25
+**Hardware:** 4× RTX 3080 Ti, seed 137, single replicate
+**Status:** ✅ Complete (50/50 gens)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Best efficiency fitness | **1.327** (gen 48) | ✅ New record — beats Exp 2's 1.179 by 12.5% |
+| Best displacement | +0.695 (at gen 48 best) | Tall tank, unconstrained |
+| 90% convergence | gen 19 | Matches Exp 2 pace |
+| Final sigma | 0.087 | Tightest of all experiments |
+| Final cond # | 47.7 | Fully converged narrow ridge |
+| Muscle count (best) | 472 | Lower than Exp 3's 674 — efficiency penalises size |
+| Sim time/gen | ~374s | On 3080 Ti, tall tank |
+
+### Locked genes (all CV < 0.15)
+
+| Gene | Final mean | Bound pressing? |
+|------|-----------|-----------------|
+| end_x | 0.334 | ← upper (0.35) |
+| t_base | 0.077 | ← upper (0.08) |
+| freq_mult | 0.505 | ← lower (0.50) ⚠️ |
+| contraction_frac | 0.293 | — (near default 0.20) |
+| cp2_x | 0.006 | ← lower (0.0) |
+| cp2_y | −0.171 | ← lower (−0.20) |
+
+### Key findings
+
+- **New record: 1.327 efficiency** — the freq_mult genome + tall tank unlocked 12.5% improvement over Exp 2. The square tank was ceiling-bound; the tall tank allows the efficiency numerator to grow freely.
+- **freq_mult pressing lower bound (0.505/0.50)**: the efficiency-optimal jellyfish wants to pulse as slowly as possible — 0.5 Hz, half the base frequency. With efficiency fitness penalising active muscle fraction, evolution minimises firing rate aggressively. This bound should be extended downward in future experiments.
+- **contraction_frac = 0.293** (vs Exp 3's 0.550): the efficiency penalty successfully constrains contraction duration. Each contraction is shorter but the period is longer, spreading the cost.
+- **Same morphological attractor as Exp 1/2/3**: end_x and t_base locked at same values — confirming the bell shape is physics-determined, not fitness-determined.
+- **Genome change is transparent**: Exp 6 replicated Exp 2's attractor with the new encoding, validating that the freq_mult substitution for refractory_frac is safe.
+
+### Success criteria outcome
+
+| Criterion | Result |
+|-----------|--------|
+| Morphology matches Exp 2 (corr > 0.85) | ✅ Same attractor |
+| freq_mult convergence (CV < 0.3) | ✅ CV = 0.00 (at lower bound) |
+| Fitness > 1.179 | ✅ 1.327 |
+| freq_mult away from 1.0 | ✅ Strongly — 0.505, lower bound |
