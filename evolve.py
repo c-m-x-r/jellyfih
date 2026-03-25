@@ -36,6 +36,7 @@ if _pre_args.tall:
     os.environ.setdefault('JELLY_DOMAIN_H',  '2.0')
 
 _TALL = _pre_args.tall
+_NO_PAYLOAD = False  # set in main(); no effect on GPU allocation
 
 import taichi as ti
 import mpm_sim as sim
@@ -133,7 +134,10 @@ def load_batch(genomes):
         spawn = np.array([0.5, 0.60]) if _TALL else None  # tall: tips clear damping zone (y>0.30)
         pos, mat, fiber, stats = fill_tank(
             genome, sim.n_particles, grid_res=int(sim.n_grid),
-            domain_height=sim.domain_height, spawn_offset=spawn
+            domain_height=sim.domain_height, spawn_offset=spawn,
+            with_payload=not _NO_PAYLOAD
+            # No-payload mode: no material==2 particles → GPU floor-contact check
+            # always sees count=0 → valid=1. Correct; no special handling needed.
         )
         sim.load_particles(i, pos, mat, fiber)
         muscle_counts.append(stats['muscle_count'])
@@ -407,7 +411,8 @@ def evolve(generations, seed=42):
         start_gen += 1  # Continue from next generation
     else:
         # Sanity checks before evolution starts
-        run_payload_sink_baseline()  # payload sinks without jellyfish
+        if not _NO_PAYLOAD:
+            run_payload_sink_baseline()  # payload sinks without jellyfish
         run_baseline()               # passive body doesn't drift with zero actuation
 
         # Initialize CMA-ES with built-in bounds handling
@@ -765,9 +770,12 @@ def main():
                         help="Number of parallel GPU instances / CMA-ES population size (default: 16)")
     parser.add_argument('--tall', action='store_true',
                         help="Use 128x256 tall tank (160K particles, domain_height=2.0) to remove ceiling exploit")
+    parser.add_argument('--no-payload', action='store_true',
+                        help="Disable payload (Experiment 4: evolve morphology without payload cargo)")
     args = parser.parse_args()
 
-    global OUTPUT_DIR
+    global OUTPUT_DIR, _NO_PAYLOAD
+    _NO_PAYLOAD = args.no_payload
     run_id = args.run_id or datetime.now().strftime('%Y%m%d_%H%M%S')
     OUTPUT_DIR = os.path.join('output', run_id)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
